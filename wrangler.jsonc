@@ -1,6 +1,6 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "asiyst-plan",
+	"name": "asiyst-plans",
 	"main": "custom-worker.mjs",
 	"compatibility_date": "2026-08-01",
 	"compatibility_flags": [
@@ -28,7 +28,7 @@
 	"services": [
 		{
 			"binding": "WORKER_SELF_REFERENCE",
-			"service": "asiyst-plan"
+			"service": "asiyst-plans"
 		}
 	],
 	"images": {
@@ -52,7 +52,7 @@
 	},
 	"env": {
 		"staging": {
-			"name": "asiyst-plan-staging",
+			"name": "asiyst-plans-staging",
 			"workers_dev": true,
 			"preview_urls": true,
 			"assets": {
@@ -62,7 +62,7 @@
 			"services": [
 				{
 					"binding": "WORKER_SELF_REFERENCE",
-					"service": "asiyst-plan-staging"
+					"service": "asiyst-plans-staging"
 				}
 			],
 			"images": {
@@ -76,7 +76,7 @@
 			"vars": {
 				"ASIYST_ENVIRONMENT": "staging",
 				"NEXT_PUBLIC_ASIYST_ENVIRONMENT": "staging",
-				"NEXT_PUBLIC_APP_URL": "https://asiyst-plan-staging.workers.dev",
+				"NEXT_PUBLIC_APP_URL": "https://asiyst-plans-staging.workers.dev",
 				"NEXT_PUBLIC_MAIN_APP_URL": "https://asiyst.com",
 				"ASIIYST_API_BASE_URL": "https://asiyst.com",
 				"DODO_PAYMENTS_ENVIRONMENT": "test_mode",
@@ -86,7 +86,7 @@
 			}
 		},
 		"production": {
-			"name": "asiyst-plan",
+			"name": "asiyst-plans",
 			"workers_dev": true,
 			"preview_urls": true,
 			// NOTE: Uncomment "routes" below ONLY after explicit production domain cutover approval.
@@ -103,7 +103,7 @@
 			"services": [
 				{
 					"binding": "WORKER_SELF_REFERENCE",
-					"service": "asiyst-plan"
+					"service": "asiyst-plans"
 				}
 			],
 			"images": {
