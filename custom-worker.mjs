@@ -7,43 +7,18 @@
  */
 
 import openNextWorker from "./.open-next/worker.js";
-export { DOQueueHandler, DOShardedTagCache, BucketCachePurge } from "./.open-next/worker.js";
-
-export interface AsiystWorkerEnv {
-  ASSETS?: { fetch: typeof fetch };
-  WORKER_SELF_REFERENCE?: { fetch: typeof fetch };
-  CRON_SECRET?: string;
-  ASIYST_EMAIL_INTERNAL_SECRET?: string;
-  ADMIN_SECRET_KEY?: string;
-  NEXT_PUBLIC_APP_URL?: string;
-  [key: string]: unknown;
-}
-
-export interface ScheduledController {
-  scheduledTime: number;
-  cron: string;
-  noRetry(): void;
-}
-
-export interface WorkerExecutionContext {
-  waitUntil(promise: Promise<unknown>): void;
-  passThroughOnException(): void;
-}
+export {
+  DOQueueHandler,
+  DOShardedTagCache,
+  BucketCachePurge,
+} from "./.open-next/worker.js";
 
 const worker = {
-  async fetch(
-    request: Request,
-    env: AsiystWorkerEnv,
-    ctx: WorkerExecutionContext,
-  ): Promise<Response> {
+  async fetch(request, env, ctx) {
     return openNextWorker.fetch(request, env, ctx);
   },
 
-  async scheduled(
-    controller: ScheduledController,
-    env: AsiystWorkerEnv,
-    ctx: WorkerExecutionContext,
-  ): Promise<void> {
+  async scheduled(controller, env, ctx) {
     const authSecret = (
       env.CRON_SECRET ||
       env.ASIYST_EMAIL_INTERNAL_SECRET ||

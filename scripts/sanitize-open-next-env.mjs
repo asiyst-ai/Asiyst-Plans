@@ -2,13 +2,14 @@ import fs from "node:fs";
 import path from "node:path";
 
 /**
- * Post-build sanitizer for OpenNext Cloudflare (`scripts/sanitize-open-next-env.mjs`).
+ * Post-build sanitizer & static assets cache populator for OpenNext Cloudflare
+ * (`scripts/sanitize-open-next-env.mjs`).
  *
- * `@opennextjs/cloudflare` compiles `.env.local` into `.open-next/cloudflare/next-env.mjs`
- * during `opennextjs-cloudflare build`. To guarantee that local `.env.local` server secrets
- * are never embedded in the generated Worker bundle (`.open-next/cloudflare/next-env.mjs`),
- * and that the Worker strictly reads server secrets from Cloudflare Worker runtime bindings
- * (`env` -> `process.env`), this script strips all non-`NEXT_PUBLIC_*` keys from `next-env.mjs`.
+ * 1. Strips non-`NEXT_PUBLIC_*` server secrets from `.open-next/cloudflare/next-env.mjs`
+ *    so that server secrets are read strictly from Cloudflare Worker runtime bindings.
+ * 2. Copies `.open-next/cache` into `.open-next/assets/cdn-cgi/_next_cache` so that
+ *    `StaticAssetsIncrementalCache` works even when Cloudflare Workers Builds runs
+ *    `npx wrangler deploy` directly after `npm run build`.
  */
 
 const nextEnvPath = path.join(
@@ -54,3 +55,20 @@ if (fs.existsSync(nextEnvPath)) {
     "🔒 Sanitized .open-next/cloudflare/next-env.mjs (server secrets stripped; runtime bindings enforced).",
   );
 }
+
+const cacheSourceDir = path.join(process.cwd(), ".open-next", "cache");
+const cacheTargetDir = path.join(
+  process.cwd(),
+  ".open-next",
+  "assets",
+  "cdn-cgi",
+  "_next_cache",
+);
+
+if (fs.existsSync(cacheSourceDir)) {
+  fs.cpSync(cacheSourceDir, cacheTargetDir, { recursive: true });
+  console.log(
+    "📦 Populated .open-next/assets/cdn-cgi/_next_cache for StaticAssetsIncrementalCache.",
+  );
+}
+
