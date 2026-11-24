@@ -12,6 +12,12 @@
 	},
 	"workers_dev": true,
 	"preview_urls": true,
+	"routes": [
+		{
+			"pattern": "plan.asiyst.com",
+			"custom_domain": true
+		}
+	],
 	"observability": {
 		"enabled": true,
 		"head_sampling_rate": 1,
@@ -89,13 +95,12 @@
 			"name": "asiyst-plans",
 			"workers_dev": true,
 			"preview_urls": true,
-			// NOTE: Uncomment "routes" below ONLY after explicit production domain cutover approval.
-			// "routes": [
-			// 	{
-			// 		"pattern": "plan.asiyst.com",
-			// 		"custom_domain": true
-			// 	}
-			// ],
+			"routes": [
+				{
+					"pattern": "plan.asiyst.com",
+					"custom_domain": true
+				}
+			],
 			"assets": {
 				"directory": ".open-next/assets",
 				"binding": "ASSETS"
