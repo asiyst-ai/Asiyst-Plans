@@ -2,12 +2,18 @@ import { NextResponse, type NextRequest } from "next/server";
 import {
   OFFICIAL_PLANS,
   comparePlanRank,
+  isPaidPlanSlug,
   normalizeOfficialPlanSlug,
 } from "@/features/catalog/plans";
 import { getOrganizationEffectiveEntitlements } from "@/features/entitlements/engine";
 import { jsonError } from "@/lib/auth/session";
 import { enqueueBillingNotification } from "@/lib/email/outbox";
 import { AsiystDodoGateway } from "@/lib/payments/dodo";
+import {
+  activateVerifiedSubscriptionPayment,
+  recordPaymentAuditEvent,
+  type PaymentLifecycleState,
+} from "@/lib/payments/state-machine";
 import {
   createAdminClient,
   isSupabaseAdminConfigured,
@@ -120,6 +126,27 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Ownership guard: metadata organization_id must match subscription's organization_id
+    if (
+      event.organizationId &&
+      String(subRow.organization_id) !== event.organizationId
+    ) {
+      await admin
+        .from("billing_webhook_events")
+        .update({
+          processing_status: "failed",
+          error_message: "Organization mismatch between webhook metadata and subscription",
+          processed_at: new Date().toISOString(),
+        })
+        .eq("provider_event_id", event.eventId);
+
+      return jsonError(
+        403,
+        "ORGANIZATION_MISMATCH",
+        "Webhook organization metadata does not match the target subscription.",
+      );
+    }
+
     const { data: orgRow } = await admin
       .from("organizations")
       .select("name")
@@ -129,10 +156,13 @@ export async function POST(request: NextRequest) {
 
     const previousPlanSlug =
       normalizeOfficialPlanSlug(String(subRow.plan || "zero")) || "zero";
-    const targetPlanSlug =
+    const resolvedCandidate =
       event.planSlug ||
       normalizeOfficialPlanSlug(String(subRow.plan || "pulse")) ||
       "pulse";
+    const targetPlanSlug = isPaidPlanSlug(resolvedCandidate)
+      ? resolvedCandidate
+      : "pulse";
     const planDef = OFFICIAL_PLANS[targetPlanSlug];
     const previousStatus = String(subRow.status || "pending").toLowerCase();
 
@@ -162,7 +192,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Case B: Subscription Lifecycle Transition (Activation, Upgrade, Downgrade, Renewal, Cancellation, Past Due)
+    // Case B: Subscription Lifecycle Transition
     else if (event.normalizedKind === "subscription.lifecycle") {
       const statusMap: Record<string, string> = {
         active: "active",
@@ -187,7 +217,7 @@ export async function POST(request: NextRequest) {
       const nextStatus =
         statusMap[event.subscriptionStatus || "active"] || "active";
 
-      // Guard against out-of-order backwards transition (active -> pending)
+      // Guard against out-of-order backwards transition (active -> pending) or activating a failed/cancelled sub directly
       if (
         nextStatus === "pending" &&
         ["active", "trialing", "past_due", "canceled", "expired"].includes(
@@ -210,205 +240,197 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      const isFirstPaidWelcomeNeeded =
-        nextStatus === "active" && !subRow.first_paid_welcome_sent_at;
+      // Paid activation & renewal MUST pass through centralized `activateVerifiedSubscriptionPayment`
+      if (nextStatus === "active") {
+        const effectiveAmount =
+          event.amountMinor > 0 ? event.amountMinor : planDef.priceMinor;
 
-      await admin
-        .from("subscriptions")
-        .update({
-          plan: targetPlanSlug,
-          status: nextStatus,
-          billing_provider: "dodo",
-          dodo_subscription_id:
-            event.providerSubscriptionId || subRow.dodo_subscription_id,
-          dodo_product_id: event.productId || subRow.dodo_product_id,
-          price_minor: planDef.priceMinor,
-          current_period_start:
-            event.currentPeriodStart ||
-            subRow.current_period_start ||
-            new Date().toISOString(),
-          current_period_end:
-            event.currentPeriodEnd || subRow.current_period_end,
-          cancel_at_period_end: Boolean(event.cancelAtPeriodEnd),
-          cancelled_at:
-            nextStatus === "canceled" ? new Date().toISOString() : null,
-          billing_recovery_deadline:
-            nextStatus === "past_due"
-              ? event.recoveryDeadline || subRow.billing_recovery_deadline
-              : null,
-          ...(isFirstPaidWelcomeNeeded
-            ? { first_paid_welcome_sent_at: new Date().toISOString() }
-            : {}),
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", subRow.id);
-
-      // Deactivate any stale free/zero subscription row when paid subscription becomes active
-      if (nextStatus === "active" || nextStatus === "trialing") {
-        await admin
-          .from("subscriptions")
-          .update({
-            status: "canceled",
-            updated_at: new Date().toISOString(),
-          })
-          .eq("organization_id", organizationId)
-          .in("plan", ["free", "zero"])
-          .eq("status", "active")
-          .is("billing_provider", null);
-
-        if (event.orderId) {
-          await admin
-            .from("billing_orders")
-            .update({
-              status: "completed",
-              updated_at: new Date().toISOString(),
-            })
-            .eq("id", event.orderId);
-        }
-      }
-
-      // Queue appropriate lifecycle emails (Strictly NO AI Credits granted!)
-      if (
-        nextStatus === "active" &&
-        !["active", "trialing"].includes(previousStatus)
-      ) {
-        const benefitsList = planDef.benefitGroups.flatMap((g) => g.items);
-
-        await enqueueBillingNotification(admin, {
+        const activation = await activateVerifiedSubscriptionPayment({
+          admin,
           organizationId,
-          eventType: "billing.subscription.activated",
-          idempotencyKeyPrefix: `dodo:${event.eventId}:activated`,
-          payload: {
-            eventType: "billing.subscription.activated",
-            organizationName,
-            productName: "Asiyst AI",
-            planName: planDef.name,
-            amountMinor: planDef.priceMinor,
-            currency: "USD",
-            billingInterval: "Monthly",
-            activationDate: new Date().toISOString().slice(0, 10),
-            nextRenewalDate: event.currentPeriodEnd
-              ? event.currentPeriodEnd.slice(0, 10)
-              : undefined,
-            includedBenefits: benefitsList,
-          },
+          subscriptionId: String(subRow.id),
+          orderId: event.orderId || null,
+          userId: event.userId || (subRow.user_id ? String(subRow.user_id) : null),
+          planSlug: targetPlanSlug,
+          productId: event.productId || null,
+          providerSubscriptionId: event.providerSubscriptionId || null,
+          providerPaymentId: event.providerPaymentId || null,
+          providerEventId: event.eventId,
+          amountMinor: effectiveAmount,
+          currency: event.currency || "USD",
+          currentPeriodStart: event.currentPeriodStart,
+          currentPeriodEnd: event.currentPeriodEnd,
+          cancelAtPeriodEnd: event.cancelAtPeriodEnd,
+          isRenewal: event.rawEventType === "subscription.renewed",
+          eventSource: "dodo_webhook",
         });
 
-        // First paid welcome email sent strictly once per organization
-        if (isFirstPaidWelcomeNeeded) {
+        if (!activation.ok) {
+          await admin
+            .from("billing_webhook_events")
+            .update({
+              processing_status: "failed",
+              error_message: `${activation.code}: ${activation.message}`,
+              processed_at: new Date().toISOString(),
+            })
+            .eq("provider_event_id", event.eventId);
+
+          return jsonError(activation.status, activation.code, activation.message);
+        }
+
+        // Notify on plan tier change if upgraded/downgraded from an active paid plan
+        if (
+          previousStatus === "active" &&
+          previousPlanSlug !== "zero" &&
+          previousPlanSlug !== targetPlanSlug
+        ) {
+          const isUpgrade =
+            comparePlanRank(targetPlanSlug, previousPlanSlug) > 0;
+          const changeEvent = isUpgrade
+            ? "billing.subscription.plan_upgraded"
+            : "billing.subscription.plan_downgraded";
+
           await enqueueBillingNotification(admin, {
             organizationId,
-            eventType: "billing.subscription.welcome",
-            idempotencyKeyPrefix: `welcome:first_paid:${organizationId}`,
+            eventType: changeEvent,
+            idempotencyKeyPrefix: `dodo:${event.eventId}:${changeEvent}`,
             payload: {
-              eventType: "billing.subscription.welcome",
+              eventType: changeEvent,
               organizationName,
-              productName: "Asiyst AI",
               planName: planDef.name,
+              previousPlanName: OFFICIAL_PLANS[previousPlanSlug].name,
               amountMinor: planDef.priceMinor,
               currency: "USD",
-              includedBenefits: benefitsList,
+              effectiveDate: new Date().toISOString().slice(0, 10),
+              includedBenefits: planDef.benefitGroups.flatMap((g) => g.items),
             },
           });
         }
-      } else if (
-        nextStatus === "active" &&
-        previousStatus === "active" &&
-        previousPlanSlug !== targetPlanSlug
-      ) {
-        const isUpgrade =
-          comparePlanRank(targetPlanSlug, previousPlanSlug) > 0;
-        const changeEvent = isUpgrade
-          ? "billing.subscription.plan_upgraded"
-          : "billing.subscription.plan_downgraded";
+      } else {
+        const nowIso = new Date().toISOString();
+        await admin
+          .from("subscriptions")
+          .update({
+            plan: targetPlanSlug,
+            status: nextStatus,
+            billing_provider: "dodo",
+            dodo_subscription_id:
+              event.providerSubscriptionId || subRow.dodo_subscription_id,
+            dodo_product_id: event.productId || subRow.dodo_product_id,
+            price_minor: planDef.priceMinor,
+            current_period_start:
+              event.currentPeriodStart || subRow.current_period_start,
+            current_period_end:
+              event.currentPeriodEnd || subRow.current_period_end,
+            cancel_at_period_end: Boolean(event.cancelAtPeriodEnd),
+            cancelled_at: nextStatus === "canceled" ? nowIso : null,
+            billing_recovery_deadline:
+              nextStatus === "past_due"
+                ? event.recoveryDeadline || subRow.billing_recovery_deadline
+                : null,
+            updated_at: nowIso,
+          })
+          .eq("id", subRow.id);
 
-        await enqueueBillingNotification(admin, {
-          organizationId,
-          eventType: changeEvent,
-          idempotencyKeyPrefix: `dodo:${event.eventId}:${changeEvent}`,
-          payload: {
-            eventType: changeEvent,
-            organizationName,
-            planName: planDef.name,
-            previousPlanName: OFFICIAL_PLANS[previousPlanSlug].name,
-            amountMinor: planDef.priceMinor,
-            currency: "USD",
-            effectiveDate: new Date().toISOString().slice(0, 10),
-            includedBenefits: planDef.benefitGroups.flatMap((g) => g.items),
-          },
-        });
-      } else if (
-        nextStatus === "active" &&
-        event.rawEventType === "subscription.renewed"
-      ) {
-        await enqueueBillingNotification(admin, {
-          organizationId,
-          eventType: "billing.subscription.renewed",
-          idempotencyKeyPrefix: `dodo:${event.eventId}:renewed`,
-          payload: {
-            eventType: "billing.subscription.renewed",
-            organizationName,
-            planName: planDef.name,
-            amountMinor: planDef.priceMinor,
-            currency: "USD",
-            billingInterval: "Monthly",
-            nextRenewalDate: event.currentPeriodEnd
-              ? event.currentPeriodEnd.slice(0, 10)
-              : undefined,
-          },
-        });
-      } else if (
-        nextStatus === "past_due" &&
-        previousStatus !== "past_due"
-      ) {
-        await enqueueBillingNotification(admin, {
-          organizationId,
-          eventType: "billing.subscription.past_due",
-          idempotencyKeyPrefix: `dodo:${event.eventId}:past_due`,
-          payload: {
+        if (nextStatus === "payment_failed" && event.orderId) {
+          await admin
+            .from("billing_orders")
+            .update({
+              status: "failed",
+              payment_state: "payment_failed",
+              updated_at: nowIso,
+            })
+            .eq("id", event.orderId);
+        }
+
+        if (nextStatus === "past_due" && previousStatus !== "past_due") {
+          await enqueueBillingNotification(admin, {
+            organizationId,
             eventType: "billing.subscription.past_due",
-            organizationName,
-            planName: planDef.name,
-            amountMinor: planDef.priceMinor,
-            currency: "USD",
-            recoveryDeadline: event.recoveryDeadline
-              ? event.recoveryDeadline.slice(0, 10)
-              : undefined,
-          },
-        });
-      } else if (
-        (nextStatus === "canceled" || nextStatus === "expired") &&
-        !["canceled", "expired"].includes(previousStatus)
-      ) {
-        await enqueueBillingNotification(admin, {
-          organizationId,
-          eventType: "billing.subscription.canceled",
-          idempotencyKeyPrefix: `dodo:${event.eventId}:canceled`,
-          payload: {
+            idempotencyKeyPrefix: `dodo:${event.eventId}:past_due`,
+            payload: {
+              eventType: "billing.subscription.past_due",
+              organizationName,
+              planName: planDef.name,
+              amountMinor: planDef.priceMinor,
+              currency: "USD",
+              recoveryDeadline: event.recoveryDeadline
+                ? event.recoveryDeadline.slice(0, 10)
+                : undefined,
+            },
+          });
+        } else if (
+          (nextStatus === "canceled" || nextStatus === "expired") &&
+          !["canceled", "expired"].includes(previousStatus)
+        ) {
+          await enqueueBillingNotification(admin, {
+            organizationId,
             eventType: "billing.subscription.canceled",
-            organizationName,
-            planName: planDef.name,
-            effectiveDate: new Date().toISOString().slice(0, 10),
-          },
-        });
+            idempotencyKeyPrefix: `dodo:${event.eventId}:canceled`,
+            payload: {
+              eventType: "billing.subscription.canceled",
+              organizationName,
+              planName: planDef.name,
+              effectiveDate: nowIso.slice(0, 10),
+            },
+          });
+        }
       }
     }
 
     // Case C: Payment Succeeded / Failed / Refunded / Disputed
-    else if (
-      event.normalizedKind === "payment.succeeded" ||
+    else if (event.normalizedKind === "payment.succeeded") {
+      const effectiveAmount =
+        event.amountMinor > 0 ? event.amountMinor : planDef.priceMinor;
+
+      const activation = await activateVerifiedSubscriptionPayment({
+        admin,
+        organizationId,
+        subscriptionId: String(subRow.id),
+        orderId: event.orderId || null,
+        userId: event.userId || (subRow.user_id ? String(subRow.user_id) : null),
+        planSlug: targetPlanSlug,
+        productId: event.productId || null,
+        providerSubscriptionId: event.providerSubscriptionId || null,
+        providerPaymentId: event.providerPaymentId || null,
+        providerEventId: event.eventId,
+        amountMinor: effectiveAmount,
+        currency: event.currency || "USD",
+        currentPeriodStart: event.currentPeriodStart,
+        currentPeriodEnd: event.currentPeriodEnd,
+        eventSource: "dodo_webhook",
+      });
+
+      if (!activation.ok) {
+        await admin
+          .from("billing_webhook_events")
+          .update({
+            processing_status: "failed",
+            error_message: `${activation.code}: ${activation.message}`,
+            processed_at: new Date().toISOString(),
+          })
+          .eq("provider_event_id", event.eventId);
+
+        return jsonError(activation.status, activation.code, activation.message);
+      }
+    } else if (
       event.normalizedKind === "payment.failed" ||
       event.normalizedKind === "payment.refunded" ||
       event.normalizedKind === "payment.disputed"
     ) {
+      const nowIso = new Date().toISOString();
       const paymentStatus =
-        event.normalizedKind === "payment.succeeded"
-          ? "succeeded"
-          : event.normalizedKind === "payment.failed"
-            ? "failed"
-            : event.normalizedKind === "payment.refunded"
-              ? "refunded"
-              : "disputed";
+        event.normalizedKind === "payment.failed"
+          ? "failed"
+          : event.normalizedKind === "payment.refunded"
+            ? "refunded"
+            : "disputed";
+      const nextPaymentState: PaymentLifecycleState =
+        event.normalizedKind === "payment.failed"
+          ? "payment_failed"
+          : event.normalizedKind === "payment.refunded"
+            ? "refunded"
+            : "disputed";
 
       if (event.providerPaymentId) {
         await admin.from("billing_payments").upsert(
@@ -419,30 +441,122 @@ export async function POST(request: NextRequest) {
             provider: "dodo",
             provider_payment_id: event.providerPaymentId,
             amount_minor: event.amountMinor || planDef.priceMinor,
-            refunded_amount_minor: event.refundAmountMinor || 0,
+            refunded_amount_minor:
+              event.normalizedKind === "payment.refunded"
+                ? event.refundAmountMinor || event.amountMinor || planDef.priceMinor
+                : 0,
             currency: event.currency || "USD",
             status: paymentStatus,
+            payment_state: nextPaymentState,
             payment_type: "subscription",
-            paid_at:
-              paymentStatus === "succeeded" ? new Date().toISOString() : null,
-            refunded_at:
-              paymentStatus === "refunded" ? new Date().toISOString() : null,
-            updated_at: new Date().toISOString(),
+            refunded_at: paymentStatus === "refunded" ? nowIso : null,
+            updated_at: nowIso,
           },
           { onConflict: "provider_payment_id" },
         );
+
+        // Update invoice status on refund or dispute
+        if (paymentStatus === "refunded" || paymentStatus === "disputed") {
+          const isPartialRefund =
+            paymentStatus === "refunded" &&
+            Boolean(event.refundAmountMinor) &&
+            (event.refundAmountMinor || 0) < (event.amountMinor || planDef.priceMinor);
+
+          await admin
+            .from("billing_invoices")
+            .update({
+              status: isPartialRefund ? "partially_refunded" : paymentStatus,
+              refunded_amount_minor:
+                paymentStatus === "refunded"
+                  ? event.refundAmountMinor || event.amountMinor || planDef.priceMinor
+                  : 0,
+              updated_at: nowIso,
+            })
+            .eq("provider_payment_id", event.providerPaymentId);
+        }
       }
 
-      const emailEventType =
-        event.normalizedKind === "payment.succeeded"
-          ? "billing.payment.succeeded"
-          : event.normalizedKind === "payment.failed"
-            ? "billing.payment.failed"
-            : event.normalizedKind === "payment.refunded"
-              ? "billing.payment.refunded"
-              : "billing.payment.dispute";
+      if (event.orderId) {
+        await admin
+          .from("billing_orders")
+          .update({
+            status:
+              paymentStatus === "failed"
+                ? "failed"
+                : paymentStatus,
+            payment_state: nextPaymentState,
+            updated_at: nowIso,
+          })
+          .eq("id", event.orderId);
+      }
 
-      // Deduplicate receipts by providerPaymentId so payment.succeeded owns the receipt notification
+      // Phase 7 & 10: Failed initial payments never activate; full refunds or chargeback disputes revoke active paid access
+      if (paymentStatus === "failed" && previousStatus === "pending") {
+        await admin
+          .from("subscriptions")
+          .update({ status: "payment_failed", updated_at: nowIso })
+          .eq("id", subRow.id);
+      } else if (paymentStatus === "refunded" || paymentStatus === "disputed") {
+        const isFullRefundOrDispute =
+          paymentStatus === "disputed" ||
+          !event.refundAmountMinor ||
+          event.refundAmountMinor >= (event.amountMinor || planDef.priceMinor);
+
+        if (isFullRefundOrDispute) {
+          await admin
+            .from("subscriptions")
+            .update({
+              status: paymentStatus === "disputed" ? "paused" : "expired",
+              cancelled_at: nowIso,
+              updated_at: nowIso,
+            })
+            .eq("id", subRow.id);
+        }
+
+        try {
+          await admin.from("subscription_change_history").insert({
+            organization_id: organizationId,
+            subscription_id: String(subRow.id),
+            change_type: paymentStatus,
+            previous_plan: targetPlanSlug,
+            new_plan: isFullRefundOrDispute ? "zero" : targetPlanSlug,
+            previous_status: previousStatus,
+            new_status: isFullRefundOrDispute
+              ? paymentStatus === "disputed"
+                ? "paused"
+                : "expired"
+              : previousStatus,
+            amount_minor:
+              event.refundAmountMinor || event.amountMinor || planDef.priceMinor,
+            currency: event.currency || "USD",
+            provider_event_id: event.eventId,
+          });
+        } catch {
+          // Non-fatal
+        }
+      }
+
+      await recordPaymentAuditEvent(admin, {
+        organizationId,
+        orderId: event.orderId || null,
+        subscriptionId: String(subRow.id),
+        previousState: null,
+        newState: nextPaymentState,
+        eventSource: "dodo_webhook",
+        providerEventId: event.eventId,
+        amountMinor:
+          event.refundAmountMinor || event.amountMinor || planDef.priceMinor,
+        currency: event.currency || "USD",
+        reason: `Webhook event ${event.rawEventType}`,
+      });
+
+      const emailEventType =
+        event.normalizedKind === "payment.failed"
+          ? "billing.payment.failed"
+          : event.normalizedKind === "payment.refunded"
+            ? "billing.payment.refunded"
+            : "billing.payment.dispute";
+
       const dedupRef = event.providerPaymentId || event.eventId;
       await enqueueBillingNotification(admin, {
         organizationId,
@@ -499,6 +613,10 @@ export async function POST(request: NextRequest) {
       })
       .eq("provider_event_id", event.eventId);
 
-    return jsonError(500, "WEBHOOK_PROCESSING_FAILED", "Internal webhook processing error.");
+    return jsonError(
+      500,
+      "WEBHOOK_PROCESSING_FAILED",
+      "Internal webhook processing error.",
+    );
   }
 }

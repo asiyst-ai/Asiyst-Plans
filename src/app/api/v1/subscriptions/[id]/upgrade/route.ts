@@ -27,7 +27,10 @@ export async function POST(request: NextRequest, context: Context) {
   const rateLimited = enforceRateLimit(request, 6, "subscription-upgrade");
   if (rateLimited) return rateLimited;
 
-  const auth = await requireAuthenticatedUser(request);
+  const auth = await requireAuthenticatedUser(request, {
+    requirePurchaseAuthorization: true,
+    returnPath: "/account/subscriptions",
+  });
   if ("error" in auth) return auth.error;
 
   const { id } = await context.params;

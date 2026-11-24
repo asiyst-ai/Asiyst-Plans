@@ -18,7 +18,11 @@ export async function POST(request: NextRequest) {
   const rateLimited = enforceRateLimit(request, 8, "free-plan-activation");
   if (rateLimited) return rateLimited;
 
-  const auth = await requireAuthenticatedUser(request);
+  const auth = await requireAuthenticatedUser(request, {
+    requirePurchaseAuthorization: true,
+    returnPath: "/checkout?plan=zero",
+    plan: "zero",
+  });
   if ("error" in auth) return auth.error;
 
   let rawBody: unknown = {};
@@ -81,6 +85,17 @@ export async function POST(request: NextRequest) {
 
   const { entitlements, rawSubscription } =
     await getOrganizationEffectiveEntitlements(auth.admin, organizationId);
+
+  if (auth.purchaseAuthorization.id) {
+    await auth.admin
+      .from("plan_purchase_authorizations")
+      .update({
+        status: "completed",
+        completed_at: new Date().toISOString(),
+      })
+      .eq("id", auth.purchaseAuthorization.id)
+      .in("status", ["active", "checkout_initiated"]);
+  }
 
   if (result === "activated") {
     await enqueueBillingNotification(auth.admin, {

@@ -1,8 +1,13 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { NextResponse, type NextRequest } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { createServerSupabaseClient } from "@/lib/supabase/server";
+import {
+  buildAsiystWebSsoUrl,
+  verifyPlanSessionFromRequest,
+  type PurchaseAuthorizationStatus,
+} from "@/lib/auth/sso";
 import { createAdminClient, isSupabaseAdminConfigured } from "@/lib/supabase/admin";
+import { createServerSupabaseClient } from "@/lib/supabase/server";
 import type { OrganizationMemberRole } from "@/types/billing";
 
 export const ASIYST_WEB_LOGIN_URL = `${process.env.NEXT_PUBLIC_MAIN_APP_URL || "https://asiyst.com"}/login`;
@@ -83,6 +88,14 @@ export function enforceRateLimit(
   return null;
 }
 
+export interface PurchaseAuthorizationContext {
+  authorized: boolean;
+  id: string | null;
+  status: PurchaseAuthorizationStatus;
+  expiresAt: string | null;
+  remainingSeconds: number;
+}
+
 export interface AuthenticatedContext {
   user: {
     id: string;
@@ -90,24 +103,109 @@ export interface AuthenticatedContext {
     fullName?: string;
     emailConfirmed: boolean;
   };
-  supabase: SupabaseClient;
+  supabase?: SupabaseClient;
   admin: SupabaseClient;
+  purchaseAuthorization: PurchaseAuthorizationContext;
+}
+
+export interface RequireAuthOptions {
+  requirePurchaseAuthorization?: boolean;
+  returnPath?: string | null;
+  plan?: string | null;
 }
 
 export async function requireAuthenticatedUser(
   request: NextRequest,
+  options: RequireAuthOptions = {},
 ): Promise<AuthenticatedContext | { error: NextResponse }> {
+  const ssoLoginUrl = buildAsiystWebSsoUrl({
+    returnPath: options.returnPath || "/checkout",
+    plan: options.plan || null,
+    reauth: false,
+  });
+
   if (!isSupabaseAdminConfigured()) {
     return {
       error: jsonError(
         401,
         "ASIYST_LOGIN_REQUIRED",
-        "Please sign in to your Asiyst account before accessing subscription management or completing payment.",
-        { loginUrl: ASIYST_WEB_LOGIN_URL },
+        "Sign in to Asiyst to buy a plan or manage your organization subscription.",
+        { loginUrl: ssoLoginUrl },
       ),
     };
   }
 
+  const admin = createAdminClient();
+
+  // 1. Check server-verified SSO session & short-lived 15-minute purchase authorization
+  const planSession = await verifyPlanSessionFromRequest(request, admin);
+  if (planSession.accountAuthenticated && planSession.user) {
+    if (options.requirePurchaseAuthorization && !planSession.purchaseAuthorized) {
+      const reauthUrl = buildAsiystWebSsoUrl({
+        returnPath: options.returnPath || "/checkout",
+        plan: options.plan || null,
+        reauth: true,
+      });
+
+      const status = planSession.purchaseAuthorizationStatus;
+      const isCompleted = status === "completed";
+      return {
+        error: jsonError(
+          401,
+          isCompleted
+            ? "PURCHASE_AUTHORIZATION_ALREADY_USED"
+            : "PURCHASE_AUTHORIZATION_EXPIRED",
+          isCompleted
+            ? "Your previous purchase authorization was already completed. Please confirm your Asiyst login to start a new purchase."
+            : "Your temporary purchase session has expired. Please sign in again on Asiyst to continue purchasing.",
+          {
+            loginUrl: reauthUrl,
+            reauthRequired: true,
+            purchaseAuthorizationStatus: status,
+          },
+        ),
+      };
+    }
+
+    return {
+      user: planSession.user,
+      admin,
+      purchaseAuthorization: {
+        authorized: planSession.purchaseAuthorized,
+        id: planSession.purchaseAuthorizationId,
+        status: planSession.purchaseAuthorizationStatus,
+        expiresAt: planSession.purchaseExpiresAt,
+        remainingSeconds: planSession.remainingPurchaseSeconds,
+      },
+    };
+  }
+
+  // If an SSO session cookie was present on the request and expired/revoked,
+  // require fresh authentication if attempting a purchase
+  if (
+    options.requirePurchaseAuthorization &&
+    planSession.purchaseAuthorizationStatus !== "missing"
+  ) {
+    const reauthUrl = buildAsiystWebSsoUrl({
+      returnPath: options.returnPath || "/checkout",
+      plan: options.plan || null,
+      reauth: true,
+    });
+    return {
+      error: jsonError(
+        401,
+        "PURCHASE_AUTHORIZATION_EXPIRED",
+        "Your purchase session has expired. Please sign in again on Asiyst to continue purchasing.",
+        {
+          loginUrl: reauthUrl,
+          reauthRequired: true,
+          purchaseAuthorizationStatus: planSession.purchaseAuthorizationStatus,
+        },
+      ),
+    };
+  }
+
+  // 2. Fallback: Check direct Supabase SSR session / Bearer token (e.g. if AUTH_COOKIE_DOMAIN or API token is used)
   try {
     const authHeader = request.headers.get("authorization") || "";
     const bearerToken = authHeader.toLowerCase().startsWith("bearer ")
@@ -122,13 +220,44 @@ export async function requireAuthenticatedUser(
         error: jsonError(
           401,
           "ASIYST_LOGIN_REQUIRED",
-          "Please sign in to your Asiyst account to continue.",
-          { loginUrl: ASIYST_WEB_LOGIN_URL },
+          "Sign in to Asiyst to buy a plan.",
+          { loginUrl: ssoLoginUrl },
         ),
       };
     }
 
-    const admin = createAdminClient();
+    // Enforce 15-minute freshness window on direct Supabase sessions when purchasing
+    const lastSignInMs = data.user.last_sign_in_at
+      ? Date.parse(data.user.last_sign_in_at)
+      : NaN;
+    const isFreshDirectPurchase =
+      Number.isFinite(lastSignInMs) &&
+      Date.now() - lastSignInMs <= 15 * 60 * 1000;
+
+    if (options.requirePurchaseAuthorization && !isFreshDirectPurchase) {
+      const reauthUrl = buildAsiystWebSsoUrl({
+        returnPath: options.returnPath || "/checkout",
+        plan: options.plan || null,
+        reauth: true,
+      });
+      return {
+        error: jsonError(
+          401,
+          "PURCHASE_AUTHORIZATION_EXPIRED",
+          "Your purchase authorization window has expired. Please confirm your Asiyst login to continue purchasing.",
+          {
+            loginUrl: reauthUrl,
+            reauthRequired: true,
+            purchaseAuthorizationStatus: "expired",
+          },
+        ),
+      };
+    }
+
+    const remainingDirectSec = isFreshDirectPurchase
+      ? Math.max(0, Math.floor((lastSignInMs + 15 * 60 * 1000 - Date.now()) / 1000))
+      : 0;
+
     return {
       user: {
         id: data.user.id,
@@ -141,14 +270,23 @@ export async function requireAuthenticatedUser(
       },
       supabase,
       admin,
+      purchaseAuthorization: {
+        authorized: isFreshDirectPurchase,
+        id: null,
+        status: isFreshDirectPurchase ? "active" : "expired",
+        expiresAt: isFreshDirectPurchase
+          ? new Date(lastSignInMs + 15 * 60 * 1000).toISOString()
+          : null,
+        remainingSeconds: remainingDirectSec,
+      },
     };
   } catch {
     return {
       error: jsonError(
         401,
         "ASIYST_LOGIN_REQUIRED",
-        "Please sign in to your Asiyst account to continue.",
-        { loginUrl: ASIYST_WEB_LOGIN_URL },
+        "Sign in to Asiyst to buy a plan.",
+        { loginUrl: ssoLoginUrl },
       ),
     };
   }

@@ -8,12 +8,16 @@ import {
   ArrowRight,
   Building2,
   CheckCircle2,
+  Clock,
   CreditCard,
+  FileText,
   Lock,
   AlertCircle,
   Loader2,
+  RefreshCw,
   ShieldCheck,
   LogIn,
+  XCircle,
 } from "lucide-react";
 import { PlanNavbar, PlanFooter } from "@/components/navigation";
 import {
@@ -27,68 +31,327 @@ import type { OfficialPlanSlug } from "@/types/billing";
 const MAIN_APP_URL =
   process.env.NEXT_PUBLIC_MAIN_APP_URL || "https://asiyst.com";
 
+function generateAttemptKey(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `attempt_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function formatCountdown(seconds: number): string {
+  const safe = Math.max(0, Math.floor(seconds));
+  const mins = Math.floor(safe / 60);
+  const secs = safe % 60;
+  return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+}
+
+interface VerifiedOrderDetails {
+  orderId: string;
+  paymentState: string;
+  isPaymentVerifiedAndActive: boolean;
+  retryAllowed: boolean;
+  planSlug: OfficialPlanSlug;
+  periodStart?: string | null;
+  periodEnd?: string | null;
+  invoiceNumber?: string | null;
+  paymentReference?: string | null;
+}
+
 function CheckoutContent() {
   const searchParams = useSearchParams();
   const initialPlanParam = searchParams.get("plan");
-  const cancelledParam = searchParams.get("checkout") === "cancelled";
+  const checkoutModeParam = searchParams.get("checkout");
+  const returnedOrderId = searchParams.get("orderId");
+  const ssoErrorParam = searchParams.get("sso_error");
 
   const [selectedSlug, setSelectedSlug] = React.useState<OfficialPlanSlug>(
     () => normalizeOfficialPlanSlug(initialPlanParam) || "pulse",
   );
+  const [attemptKey, setAttemptKey] = React.useState<string>(() =>
+    generateAttemptKey(),
+  );
+  const inFlightMutexRef = React.useRef<boolean>(false);
+
   const [sessionState, setSessionState] = React.useState<{
     loading: boolean;
     authenticated: boolean;
+    purchaseAuthorized: boolean;
+    purchaseAuthStatus: string;
+    remainingSeconds: number;
     userEmail?: string;
+    userFullName?: string;
     organizationName?: string;
     loginUrl: string;
+    reauthUrl: string;
   }>({
     loading: true,
     authenticated: false,
-    loginUrl: `${MAIN_APP_URL}/login`,
+    purchaseAuthorized: false,
+    purchaseAuthStatus: "missing",
+    remainingSeconds: 0,
+    loginUrl: `${MAIN_APP_URL}/api/v1/auth/sso/plan/start?returnPath=%2Fcheckout&source=direct_plan_login`,
+    reauthUrl: `${MAIN_APP_URL}/api/v1/auth/sso/plan/start?returnPath=%2Fcheckout&source=reauth&reauth=1`,
   });
+
   const [submitting, setSubmitting] = React.useState(false);
+  const [verifyingReturn, setVerifyingReturn] = React.useState<boolean>(
+    Boolean(checkoutModeParam === "return" && returnedOrderId),
+  );
+  const [verifiedOrder, setVerifiedOrder] =
+    React.useState<VerifiedOrderDetails | null>(null);
+
   const [statusMessage, setStatusMessage] = React.useState<{
-    type: "success" | "error" | "info" | "login_required";
+    type:
+      | "success"
+      | "error"
+      | "info"
+      | "pending"
+      | "login_required"
+      | "purchase_expired";
     code?: string;
     text: string;
     orderId?: string;
-  } | null>(
-    cancelledParam
-      ? {
-          type: "info",
-          text: "Your previous checkout session was cancelled. No charges were made and your current entitlements remain unchanged.",
-        }
-      : null,
-  );
+  } | null>(() => {
+    if (ssoErrorParam) {
+      return {
+        type: "purchase_expired",
+        code: ssoErrorParam.toUpperCase(),
+        text:
+          ssoErrorParam === "sso_code_expired"
+            ? "Your authentication handoff expired before completion. Please sign in again to continue purchasing."
+            : ssoErrorParam === "sso_code_already_used"
+              ? "That single-use sign-in link was already used. Please sign in again to start a fresh purchase session."
+              : "Unable to verify your authentication handoff. Please sign in again to continue.",
+      };
+    }
+    return null;
+  });
 
-  React.useEffect(() => {
-    let active = true;
-    fetch("/api/v1/auth/session")
-      .then((res) => res.json())
-      .then((body) => {
-        if (!active) return;
+  // Load & refresh server-verified authentication + 15-minute purchase authorization
+  const loadSession = React.useCallback(
+    async (planForReturn: OfficialPlanSlug) => {
+      const returnPath = `/checkout?plan=${encodeURIComponent(planForReturn)}`;
+      try {
+        const res = await fetch(
+          `/api/v1/auth/session?returnPath=${encodeURIComponent(returnPath)}&plan=${encodeURIComponent(planForReturn)}`,
+          { cache: "no-store" },
+        );
+        const body = await res.json();
         const data = body?.data;
         setSessionState({
           loading: false,
           authenticated: Boolean(data?.authenticated),
+          purchaseAuthorized: Boolean(data?.purchaseAuthorized),
+          purchaseAuthStatus: String(
+            data?.purchaseAuthorization?.status || "missing",
+          ),
+          remainingSeconds: Number(
+            data?.purchaseAuthorization?.remainingSeconds || 0,
+          ),
           userEmail: data?.user?.email,
+          userFullName: data?.user?.fullName,
           organizationName: data?.organization?.name,
-          loginUrl: data?.loginUrl || `${MAIN_APP_URL}/login`,
+          loginUrl:
+            data?.loginUrl ||
+            `${MAIN_APP_URL}/api/v1/auth/sso/plan/start?returnPath=${encodeURIComponent(returnPath)}&plan=${planForReturn}&source=direct_plan_login`,
+          reauthUrl:
+            data?.reauthUrl ||
+            `${MAIN_APP_URL}/api/v1/auth/sso/plan/start?returnPath=${encodeURIComponent(returnPath)}&plan=${planForReturn}&source=reauth&reauth=1`,
         });
+      } catch {
+        setSessionState((prev) => ({
+          ...prev,
+          loading: false,
+          authenticated: false,
+          purchaseAuthorized: false,
+        }));
+      }
+    },
+    [],
+  );
+
+  React.useEffect(() => {
+    let cancelled = false;
+    void Promise.resolve().then(() => {
+      if (!cancelled) {
+        void loadSession(selectedSlug);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadSession, selectedSlug]);
+
+  // Countdown tick for short-lived 15-minute purchase authorization
+  React.useEffect(() => {
+    if (!sessionState.purchaseAuthorized || sessionState.remainingSeconds <= 0) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      setSessionState((prev) => {
+        if (!prev.purchaseAuthorized) return prev;
+        if (prev.remainingSeconds <= 1) {
+          return {
+            ...prev,
+            purchaseAuthorized: false,
+            purchaseAuthStatus: "expired",
+            remainingSeconds: 0,
+          };
+        }
+        return {
+          ...prev,
+          remainingSeconds: prev.remainingSeconds - 1,
+        };
+      });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [sessionState.purchaseAuthorized, sessionState.remainingSeconds]);
+
+  // Reconcile order status server-side when returning from Dodo Payments (NEVER trust URL params alone!)
+  const checkReturnedOrderStatus = React.useCallback(async (orderId: string) => {
+    setVerifyingReturn(true);
+    try {
+      const res = await fetch(
+        `/api/v1/checkout/${encodeURIComponent(orderId)}?reconcile=1`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) {
+        setVerifyingReturn(false);
+        return false;
+      }
+      const payload = await res.json();
+      const data = payload?.data;
+      const paymentState = String(data?.paymentState || "checkout_pending");
+      const isVerified = Boolean(data?.isPaymentVerifiedAndActive);
+      const orderPlan =
+        normalizeOfficialPlanSlug(data?.order?.plan_slug) || "pulse";
+
+      setVerifiedOrder({
+        orderId,
+        paymentState,
+        isPaymentVerifiedAndActive: isVerified,
+        retryAllowed: Boolean(data?.retryAllowed),
+        planSlug: orderPlan,
+        periodStart: data?.subscription?.current_period_start || null,
+        periodEnd: data?.subscription?.current_period_end || null,
+        invoiceNumber: data?.invoice?.invoice_number || null,
+        paymentReference:
+          data?.invoice?.provider_payment_id ||
+          data?.order?.provider_checkout_id ||
+          orderId,
+      });
+
+      if (isVerified) {
+        setStatusMessage({
+          type: "success",
+          text: `${OFFICIAL_PLANS[orderPlan].name} has been verified and activated for your organization!`,
+          orderId,
+        });
+        setVerifyingReturn(false);
+        return true;
+      }
+
+      if (paymentState === "payment_failed") {
+        setStatusMessage({
+          type: "error",
+          code: "PAYMENT_FAILED",
+          text: "Payment unsuccessful. No subscription has been activated and no paid benefits were granted. You may safely retry below.",
+          orderId,
+        });
+        setAttemptKey(generateAttemptKey());
+        setVerifyingReturn(false);
+        return true;
+      }
+
+      if (paymentState === "expired") {
+        setStatusMessage({
+          type: "purchase_expired",
+          code: "CHECKOUT_EXPIRED",
+          text: "Purchase session expired. No new payment was initiated. Sign in again to continue purchasing.",
+          orderId,
+        });
+        setVerifyingReturn(false);
+        return true;
+      }
+
+      if (paymentState === "payment_cancelled") {
+        setStatusMessage({
+          type: "info",
+          code: "CHECKOUT_CANCELLED",
+          text: "Your checkout session was cancelled. No charges were made and your current plan remains unchanged.",
+          orderId,
+        });
+        setAttemptKey(generateAttemptKey());
+        setVerifyingReturn(false);
+        return true;
+      }
+
+      // Still pending provider confirmation
+      setStatusMessage({
+        type: "pending",
+        code: "PAYMENT_VERIFICATION_PENDING",
+        text: "Payment is being verified with Dodo Payments. Please do not initiate another payment while verification completes.",
+        orderId,
+      });
+      return false;
+    } catch {
+      setVerifyingReturn(false);
+      return false;
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (!returnedOrderId) return;
+    let cancelled = false;
+
+    if (checkoutModeParam === "cancelled") {
+      void fetch(`/api/v1/checkout/${encodeURIComponent(returnedOrderId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "cancel" }),
       })
-      .catch(() => {
-        if (active) {
-          setSessionState({
-            loading: false,
-            authenticated: false,
-            loginUrl: `${MAIN_APP_URL}/login`,
-          });
+        .then((r) => r.json())
+        .then((res) => {
+          if (cancelled) return;
+          if (res?.data?.activated) {
+            void checkReturnedOrderStatus(returnedOrderId);
+          } else {
+            setStatusMessage({
+              type: "info",
+              text: "Your previous checkout session was cancelled safely. No charges were made and your current entitlements remain unchanged.",
+            });
+            setAttemptKey(generateAttemptKey());
+          }
+        })
+        .catch(() => undefined);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (checkoutModeParam === "return") {
+      let polls = 0;
+      const runPoll = async () => {
+        if (cancelled) return;
+        const settled = await checkReturnedOrderStatus(returnedOrderId);
+        polls += 1;
+        if (!settled && !cancelled && polls < 8) {
+          window.setTimeout(runPoll, 3000);
+        } else if (!cancelled) {
+          setVerifyingReturn(false);
+        }
+      };
+      void Promise.resolve().then(() => {
+        if (!cancelled) {
+          void runPoll();
         }
       });
+    }
+
     return () => {
-      active = false;
+      cancelled = true;
     };
-  }, []);
+  }, [checkoutModeParam, returnedOrderId, checkReturnedOrderStatus]);
 
   const selectedPlan = OFFICIAL_PLANS[selectedSlug];
   const priceDisplay = formatMinorCurrency(
@@ -97,19 +360,39 @@ function CheckoutContent() {
     true,
   );
 
+  const isPurchaseExpired =
+    sessionState.authenticated &&
+    !sessionState.purchaseAuthorized &&
+    sessionState.purchaseAuthStatus !== "missing";
+
   async function handleCheckoutSubmit(e: React.FormEvent) {
     e.preventDefault();
 
-    // Requirement 4: If user is not logged in on Asiyst-WEB, ask them to log in before payment
+    // Synchronous mutex prevents rapid double-clicks within the same millisecond
+    if (inFlightMutexRef.current || submitting || verifyingReturn) {
+      return;
+    }
+
     if (!sessionState.authenticated) {
       setStatusMessage({
         type: "login_required",
         code: "ASIYST_LOGIN_REQUIRED",
-        text: "Please sign in with your Asiyst Web account before completing payment or activating a subscription plan.",
+        text: "Sign in to Asiyst to buy a plan.",
+      });
+      window.location.assign(sessionState.loginUrl);
+      return;
+    }
+
+    if (!sessionState.purchaseAuthorized) {
+      setStatusMessage({
+        type: "purchase_expired",
+        code: "PURCHASE_AUTHORIZATION_EXPIRED",
+        text: "Purchase session expired. No new payment was initiated. Sign in again to continue purchasing.",
       });
       return;
     }
 
+    inFlightMutexRef.current = true;
     setSubmitting(true);
     setStatusMessage(null);
 
@@ -121,64 +404,203 @@ function CheckoutContent() {
           body: JSON.stringify({}),
         });
         const payload = await res.json();
+
         if (res.status === 401) {
+          const isExpired =
+            payload?.error?.code === "PURCHASE_AUTHORIZATION_EXPIRED" ||
+            payload?.error?.code === "PURCHASE_AUTHORIZATION_ALREADY_USED";
           setStatusMessage({
-            type: "login_required",
-            code: "ASIYST_LOGIN_REQUIRED",
-            text: "Please sign in with your Asiyst Web account to activate this plan.",
+            type: isExpired ? "purchase_expired" : "login_required",
+            code: payload?.error?.code,
+            text:
+              payload?.error?.message ||
+              "Sign in to Asiyst to activate this plan.",
           });
+          await loadSession(selectedSlug);
         } else if (!res.ok) {
           setStatusMessage({
             type: "error",
             code: payload?.error?.code,
             text:
               payload?.error?.message ||
-              "Unable to activate Asiyst Zero. Please make sure you are signed in as an organization owner or billing administrator.",
+              "Unable to activate Asiyst Zero. Ensure you are an organization owner or billing administrator.",
           });
         } else {
           setStatusMessage({
             type: "success",
             text: payload?.data?.alreadyActive
               ? "Asiyst Zero is already active for your organization."
-              : "Asiyst Zero ($0) has been activated for your organization! Your free entitlements are now active in Asiyst-WEB.",
+              : "Asiyst Zero ($0) has been activated for your organization! Your entitlements are active in Asiyst-WEB.",
           });
+          await loadSession(selectedSlug);
         }
-      } else {
-        const res = await fetch("/api/v1/checkout/session", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ plan: selectedSlug }),
-        });
-        const payload = await res.json();
-
-        if (res.status === 401) {
-          setStatusMessage({
-            type: "login_required",
-            code: "ASIYST_LOGIN_REQUIRED",
-            text: "Please sign in with your Asiyst Web account before proceeding to payment.",
-          });
-        } else if (!res.ok) {
-          setStatusMessage({
-            type: "error",
-            code: payload?.error?.code,
-            orderId: payload?.error?.details?.orderId,
-            text:
-              payload?.error?.message ||
-              "Unable to create Dodo Payments checkout session.",
-          });
-        } else if (payload?.data?.checkoutUrl) {
-          window.location.href = payload.data.checkoutUrl;
-          return;
-        }
+        inFlightMutexRef.current = false;
+        setSubmitting(false);
+        return;
       }
+
+      const res = await fetch("/api/v1/checkout/session", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": attemptKey,
+        },
+        body: JSON.stringify({
+          plan: selectedSlug,
+          idempotencyKey: attemptKey,
+        }),
+      });
+      const payload = await res.json();
+
+      if (res.status === 401) {
+        const isExpired =
+          payload?.error?.code === "PURCHASE_AUTHORIZATION_EXPIRED" ||
+          payload?.error?.code === "PURCHASE_AUTHORIZATION_ALREADY_USED";
+        setStatusMessage({
+          type: isExpired ? "purchase_expired" : "login_required",
+          code: payload?.error?.code,
+          text:
+            payload?.error?.message ||
+            "Your purchase session expired. Sign in again on Asiyst to continue purchasing.",
+        });
+        await loadSession(selectedSlug);
+        inFlightMutexRef.current = false;
+        setSubmitting(false);
+        return;
+      }
+
+      if (!res.ok) {
+        const errCode = payload?.error?.code;
+        setStatusMessage({
+          type:
+            errCode === "PAYMENT_VERIFICATION_IN_PROGRESS" ? "pending" : "error",
+          code: errCode,
+          orderId: payload?.error?.details?.orderId,
+          text:
+            payload?.error?.message ||
+            "Unable to start Dodo Payments checkout session.",
+        });
+        if (errCode !== "PAYMENT_VERIFICATION_IN_PROGRESS") {
+          setAttemptKey(generateAttemptKey());
+        }
+        inFlightMutexRef.current = false;
+        setSubmitting(false);
+        return;
+      }
+
+      if (payload?.data?.alreadyPaidAndActivated) {
+        setStatusMessage({
+          type: "success",
+          orderId: payload.data.orderId,
+          text: "Your previous payment was already confirmed and your subscription is now active! No duplicate charge was created.",
+        });
+        inFlightMutexRef.current = false;
+        setSubmitting(false);
+        return;
+      }
+
+      if (payload?.data?.checkoutUrl) {
+        // Keep button locked during browser navigation to Dodo Payments so a second click is impossible
+        window.location.assign(payload.data.checkoutUrl);
+        return;
+      }
+
+      inFlightMutexRef.current = false;
+      setSubmitting(false);
     } catch {
       setStatusMessage({
         type: "error",
-        text: "A network error occurred while communicating with the Asiyst Plan billing server.",
+        text: "A network error occurred while communicating with the Asiyst Plan billing server. Please check your connection before retrying.",
       });
-    } finally {
+      inFlightMutexRef.current = false;
       setSubmitting(false);
     }
+  }
+
+  // Verified Post-Payment Confirmation View (Phase 9)
+  if (verifiedOrder?.isPaymentVerifiedAndActive) {
+    const activePlan = OFFICIAL_PLANS[verifiedOrder.planSlug];
+    return (
+      <div className="mx-auto max-w-2xl rounded-3xl border-2 border-[#171D1B] bg-[#FCFCFD] p-8 shadow-sm space-y-6">
+        <div className="flex items-center gap-3.5">
+          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-[#171D1B] text-[#C6F36A]">
+            <CheckCircle2 className="h-6 w-6" />
+          </div>
+          <div>
+            <span className="text-[11px] font-mono font-bold uppercase tracking-widest text-emerald-700">
+              Verified Payment Confirmation
+            </span>
+            <h1 className="text-2xl font-extrabold text-[#171D1B]">
+              Payment Successful · {activePlan.name} Activated
+            </h1>
+          </div>
+        </div>
+
+        <p className="text-xs leading-relaxed text-[#69736C]">
+          Your payment has been cryptographically verified with Dodo Payments and your organization&apos;s{" "}
+          <strong className="text-[#171D1B]">{activePlan.name}</strong> entitlements are now active across Asiyst-WEB. A confirmation email and official receipt have been queued for your billing contacts.
+        </p>
+
+        <div className="rounded-2xl border border-[#D0CCC6] bg-[#F9F9F9] p-5 space-y-2.5 text-xs">
+          <div className="flex justify-between">
+            <span className="text-[#69736C]">Activated Plan</span>
+            <span className="font-bold text-[#171D1B]">{activePlan.name}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-[#69736C]">Amount Verified</span>
+            <span className="font-bold text-[#171D1B]">
+              {formatMinorCurrency(activePlan.priceMinor, "USD", true)} USD / month
+            </span>
+          </div>
+          {verifiedOrder.periodStart && verifiedOrder.periodEnd && (
+            <div className="flex justify-between">
+              <span className="text-[#69736C]">Subscription Period</span>
+              <span className="font-mono text-[#171D1B]">
+                {verifiedOrder.periodStart.slice(0, 10)} →{" "}
+                {verifiedOrder.periodEnd.slice(0, 10)}
+              </span>
+            </div>
+          )}
+          <div className="flex justify-between">
+            <span className="text-[#69736C]">Payment Reference</span>
+            <span className="font-mono text-[#171D1B]">
+              {verifiedOrder.paymentReference}
+            </span>
+          </div>
+          {verifiedOrder.invoiceNumber && (
+            <div className="flex justify-between">
+              <span className="text-[#69736C]">Official Receipt #</span>
+              <span className="font-mono font-bold text-[#171D1B]">
+                {verifiedOrder.invoiceNumber}
+              </span>
+            </div>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3 pt-2">
+          <Link
+            href="/account/invoices"
+            className="inline-flex items-center gap-2 rounded-xl bg-[#171D1B] px-5 py-3 text-xs font-bold text-[#FCFCFD] hover:bg-[#2d3431] transition"
+          >
+            <FileText className="h-4 w-4 text-[#C6F36A]" />
+            <span>View &amp; Download Receipt</span>
+          </Link>
+          <Link
+            href="/account/subscriptions"
+            className="inline-flex items-center gap-2 rounded-xl border border-[#3F434C] bg-[#F9F9F9] px-5 py-3 text-xs font-bold text-[#3F434C] hover:bg-[#D0CCC6]/35 transition"
+          >
+            <span>Manage Subscription</span>
+          </Link>
+          <a
+            href={`${MAIN_APP_URL}/dashboard/settings?tab=billing`}
+            className="inline-flex items-center gap-1.5 px-3 py-3 text-xs font-bold text-[#3F434C] hover:underline"
+          >
+            <span>Return to Asiyst Dashboard</span>
+            <ArrowRight className="h-3.5 w-3.5" />
+          </a>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -215,11 +637,15 @@ function CheckoutContent() {
                 <button
                   key={plan.slug}
                   type="button"
+                  disabled={submitting || verifyingReturn}
                   onClick={() => {
-                    setSelectedSlug(plan.slug);
-                    setStatusMessage(null);
+                    if (plan.slug !== selectedSlug) {
+                      setSelectedSlug(plan.slug);
+                      setAttemptKey(generateAttemptKey());
+                      setStatusMessage(null);
+                    }
                   }}
-                  className={`flex flex-col justify-between rounded-xl border p-4 text-left transition cursor-pointer ${
+                  className={`flex flex-col justify-between rounded-xl border p-4 text-left transition cursor-pointer disabled:opacity-60 ${
                     isSelected
                       ? "border-2 border-[#3F434C] bg-[#C6F36A]/20 shadow-xs"
                       : "border-[#D0CCC6] bg-[#F9F9F9] hover:border-[#3F434C]/60"
@@ -274,7 +700,7 @@ function CheckoutContent() {
               Verified Backend Entitlement Activation Policy
             </p>
             <p className="leading-relaxed">
-              For paid plans (Pulse, Vector, Quantum), creating a checkout session sets your order to <code>pending</code>. Your purchased benefits activate in Asiyst-WEB strictly after Dodo Payments confirms the payment via our verified server webhook. No AI Credits are included in subscription plans.
+              Creating a checkout session sets your purchase intent to <code>checkout_pending</code>. Subscription benefits activate in Asiyst-WEB strictly after Dodo Payments confirms your payment via cryptographic webhook or server-to-server verification. No AI Credits are included in subscription plans.
             </p>
           </div>
         </div>
@@ -287,18 +713,30 @@ function CheckoutContent() {
           className="sticky top-24 rounded-2xl border-2 border-[#3F434C] bg-[#FCFCFD] p-6 shadow-sm space-y-6"
         >
           <div className="flex items-center justify-between border-b border-[#D0CCC6] pb-4">
-            <div>
+            <div className="min-w-0">
               <h2 className="text-lg font-extrabold text-[#3F434C]">
                 Payment &amp; Order Summary
               </h2>
-              <p className="text-xs text-[#69736C]">
+              <p className="text-xs text-[#69736C] truncate">
                 {sessionState.authenticated
-                  ? `Organization: ${sessionState.organizationName || sessionState.userEmail || "Verified Account"}`
-                  : "Sign in on Asiyst required before payment"}
+                  ? `${sessionState.organizationName || "Verified Workspace"} · ${sessionState.userEmail || ""}`
+                  : "Sign in to Asiyst to buy a plan"}
               </p>
             </div>
-            <Building2 className="h-5 w-5 text-[#3F434C]" />
+            <Building2 className="h-5 w-5 shrink-0 text-[#3F434C]" />
           </div>
+
+          {sessionState.authenticated && sessionState.purchaseAuthorized && (
+            <div className="flex items-center justify-between rounded-xl border border-emerald-700/25 bg-emerald-50/70 px-3.5 py-2.5 text-xs text-emerald-950">
+              <div className="flex items-center gap-2 font-semibold">
+                <Clock className="h-3.5 w-3.5 text-emerald-700" />
+                <span>Purchase session active</span>
+              </div>
+              <span className="font-mono font-bold">
+                {formatCountdown(sessionState.remainingSeconds)}
+              </span>
+            </div>
+          )}
 
           <div className="space-y-3 text-xs">
             <div className="flex items-center justify-between">
@@ -318,8 +756,8 @@ function CheckoutContent() {
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-[#69736C]">Plan Subtotal</span>
-              <span className="font-semibold text-[#3F434C]">{priceDisplay}</span>
+              <span className="text-[#69736C]">Authoritative Subtotal</span>
+              <span className="font-semibold text-[#3F434C]">{priceDisplay} USD</span>
             </div>
             <div className="flex items-center justify-between">
               <span className="text-[#69736C]">Applicable Taxes</span>
@@ -328,10 +766,6 @@ function CheckoutContent() {
                   ? "Calculated at Dodo Payments checkout"
                   : "$0.00"}
               </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-[#69736C]">Discounts</span>
-              <span className="text-[#69736C]">$0.00</span>
             </div>
             <div className="flex items-center justify-between">
               <span className="text-[#69736C]">AI Credits Included</span>
@@ -353,96 +787,172 @@ function CheckoutContent() {
             </div>
           </div>
 
+          {/* Unauthenticated Prompt */}
           {!sessionState.loading && !sessionState.authenticated && (
             <div className="rounded-xl border-2 border-[#3F434C] bg-[#F9F9F9] p-4 text-xs space-y-3">
               <div className="flex items-center gap-2 font-bold text-[#3F434C]">
                 <LogIn className="h-4 w-4 shrink-0" />
-                <span>Sign in on Asiyst Web to Continue</span>
+                <span>Sign in to Asiyst to buy a plan</span>
               </div>
               <p className="text-[#69736C] leading-relaxed">
-                You can explore and compare plans freely. Before completing payment or activating a subscription, please sign in with your Asiyst account so your plan benefits are linked to your organization.
+                Your selected plan (<strong>{selectedPlan.name}</strong>) will be preserved automatically. If you are already signed in on Asiyst Web, clicking below verifies your account immediately without asking for your password twice.
               </p>
               <a
                 href={sessionState.loginUrl}
                 className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#3F434C] px-4 py-2.5 text-xs font-bold text-[#FCFCFD] hover:bg-[#2a2d33] transition"
               >
                 <LogIn className="h-3.5 w-3.5 text-[#C6F36A]" />
-                <span>Sign in on Asiyst Web</span>
+                <span>Continue with Asiyst Account</span>
                 <ArrowRight className="h-3.5 w-3.5" />
               </a>
             </div>
           )}
 
+          {/* Expired Short-Lived Purchase Authorization Prompt (Phase 3 & 9) */}
+          {!sessionState.loading && isPurchaseExpired && (
+            <div className="rounded-xl border-2 border-amber-700/50 bg-amber-50 p-4 text-xs text-amber-950 space-y-3">
+              <div className="flex items-center gap-2 font-bold">
+                <Clock className="h-4 w-4 shrink-0 text-amber-800" />
+                <span>Purchase session expired</span>
+              </div>
+              <p className="leading-relaxed">
+                For your financial security, subscription purchase sessions expire after 15 minutes of inactivity. No new payment was initiated, and your main Asiyst dashboard session remains active. Sign in again to continue purchasing.
+              </p>
+              <a
+                href={sessionState.reauthUrl}
+                className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#171D1B] px-4 py-2.5 text-xs font-bold text-[#FCFCFD] hover:bg-[#2d3431] transition"
+              >
+                <LogIn className="h-3.5 w-3.5 text-[#C6F36A]" />
+                <span>Sign in again to continue purchasing</span>
+                <ArrowRight className="h-3.5 w-3.5" />
+              </a>
+            </div>
+          )}
+
+          {/* Status Messages (Pending, Failed, Cancelled, Info) */}
           {statusMessage && (
             <div
-              className={`rounded-xl border p-4 text-xs space-y-2 ${
+              className={`rounded-xl border p-4 text-xs space-y-2.5 ${
                 statusMessage.type === "success"
                   ? "border-emerald-700/30 bg-emerald-50 text-emerald-950"
-                  : statusMessage.type === "info"
-                    ? "border-[#D0CCC6] bg-[#F9F9F9] text-[#3F434C]"
-                    : "border-amber-700/40 bg-amber-50 text-amber-950"
+                  : statusMessage.type === "pending"
+                    ? "border-sky-700/30 bg-sky-50 text-sky-950"
+                    : statusMessage.type === "info"
+                      ? "border-[#D0CCC6] bg-[#F9F9F9] text-[#3F434C]"
+                      : "border-amber-700/40 bg-amber-50 text-amber-950"
               }`}
             >
               <div className="flex items-center gap-2 font-bold">
-                <AlertCircle className="h-4 w-4 shrink-0" />
+                {statusMessage.type === "pending" ? (
+                  <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                ) : statusMessage.type === "error" ? (
+                  <XCircle className="h-4 w-4 shrink-0" />
+                ) : (
+                  <AlertCircle className="h-4 w-4 shrink-0" />
+                )}
                 <span>
-                  {statusMessage.code
-                    ? `Notice (${statusMessage.code})`
-                    : "Checkout Update"}
+                  {statusMessage.type === "pending"
+                    ? "Verifying Payment Status"
+                    : statusMessage.code
+                      ? `Notice (${statusMessage.code})`
+                      : "Checkout Update"}
                 </span>
               </div>
               <p className="leading-relaxed">{statusMessage.text}</p>
-              {statusMessage.type === "login_required" && (
+
+              {statusMessage.type === "pending" && returnedOrderId && (
+                <button
+                  type="button"
+                  onClick={() => void checkReturnedOrderStatus(returnedOrderId)}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-sky-800/30 bg-white px-3 py-1.5 text-[11px] font-bold text-sky-950 hover:bg-sky-100/50 transition cursor-pointer"
+                >
+                  <RefreshCw className="h-3 w-3" />
+                  <span>Check Verification Status</span>
+                </button>
+              )}
+
+              {(statusMessage.type === "login_required" ||
+                statusMessage.type === "purchase_expired") && (
                 <a
-                  href={sessionState.loginUrl}
+                  href={
+                    statusMessage.type === "purchase_expired"
+                      ? sessionState.reauthUrl
+                      : sessionState.loginUrl
+                  }
                   className="inline-flex items-center gap-1.5 rounded-lg bg-[#3F434C] px-3.5 py-2 text-xs font-bold text-[#FCFCFD] mt-1"
                 >
                   <LogIn className="h-3.5 w-3.5 text-[#C6F36A]" />
-                  <span>Go to Asiyst Web Sign In</span>
+                  <span>
+                    {statusMessage.type === "purchase_expired"
+                      ? "Sign in again on Asiyst"
+                      : "Sign in on Asiyst"}
+                  </span>
                 </a>
               )}
+
               {statusMessage.orderId && (
                 <p className="font-mono text-[11px] pt-1">
-                  Internal Order ID: {statusMessage.orderId} (Benefits locked until payment verified)
+                  Purchase Intent ID: {statusMessage.orderId}
                 </p>
               )}
             </div>
           )}
 
-          <button
-            type="submit"
-            disabled={submitting}
-            className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#3F434C] px-5 py-3.5 text-sm font-bold text-[#FCFCFD] hover:bg-[#2a2d33] disabled:opacity-60 transition shadow-xs cursor-pointer"
-          >
-            {submitting ? (
-              <>
-                <Loader2 className="h-4 w-4 animate-spin text-[#C6F36A]" />
-                <span>Processing securely...</span>
-              </>
-            ) : !sessionState.authenticated ? (
-              <>
-                <LogIn className="h-4 w-4 text-[#C6F36A]" />
-                <span>Sign in Required Before Payment</span>
-              </>
-            ) : selectedPlan.requiresDodoCheckout ? (
-              <>
-                <CreditCard className="h-4 w-4 text-[#C6F36A]" />
-                <span>Proceed to Dodo Payments ({priceDisplay}/mo)</span>
-                <ArrowRight className="h-4 w-4" />
-              </>
-            ) : (
-              <>
-                <CheckCircle2 className="h-4 w-4 text-[#C6F36A]" />
-                <span>Activate Asiyst Zero (Free)</span>
-              </>
-            )}
-          </button>
+          {/* Primary Action Button */}
+          {isPurchaseExpired ? (
+            <a
+              href={sessionState.reauthUrl}
+              className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#171D1B] px-5 py-3.5 text-sm font-bold text-[#FCFCFD] hover:bg-[#2a2d33] transition shadow-xs"
+            >
+              <LogIn className="h-4 w-4 text-[#C6F36A]" />
+              <span>Sign in Again to Unlock Purchase</span>
+            </a>
+          ) : (
+            <button
+              type="submit"
+              disabled={
+                submitting ||
+                verifyingReturn ||
+                sessionState.loading ||
+                statusMessage?.type === "pending"
+              }
+              className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#3F434C] px-5 py-3.5 text-sm font-bold text-[#FCFCFD] hover:bg-[#2a2d33] disabled:opacity-60 disabled:cursor-not-allowed transition shadow-xs cursor-pointer"
+            >
+              {submitting ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin text-[#C6F36A]" />
+                  <span>Processing payment securely — do not refresh…</span>
+                </>
+              ) : verifyingReturn || statusMessage?.type === "pending" ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin text-[#C6F36A]" />
+                  <span>Payment verification in progress…</span>
+                </>
+              ) : !sessionState.authenticated ? (
+                <>
+                  <LogIn className="h-4 w-4 text-[#C6F36A]" />
+                  <span>Sign in to Asiyst to buy a plan</span>
+                </>
+              ) : selectedPlan.requiresDodoCheckout ? (
+                <>
+                  <CreditCard className="h-4 w-4 text-[#C6F36A]" />
+                  <span>Proceed to Dodo Payments ({priceDisplay}/mo)</span>
+                  <ArrowRight className="h-4 w-4" />
+                </>
+              ) : (
+                <>
+                  <CheckCircle2 className="h-4 w-4 text-[#C6F36A]" />
+                  <span>Activate Asiyst Zero (Free)</span>
+                </>
+              )}
+            </button>
+          )}
 
           <div className="flex items-center justify-center gap-1.5 text-[11px] text-[#69736C]">
             <Lock className="h-3 w-3" />
             <span>
               {selectedPlan.requiresDodoCheckout
-                ? "Hosted checkout powered by Dodo Payments · Webhook-verified activation"
+                ? "Idempotent checkout · Server-verified webhook activation"
                 : "Direct backend free-plan activation · No credit card required"}
             </span>
           </div>

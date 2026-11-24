@@ -148,6 +148,27 @@ export interface DodoSubscriptionCheckoutInput {
   userName?: string;
   successUrl: string;
   cancelUrl: string;
+  idempotencyKey?: string;
+}
+
+export interface DodoAuthoritativeStatus {
+  ok: boolean;
+  outcome:
+    | "succeeded"
+    | "pending"
+    | "failed"
+    | "cancelled"
+    | "expired"
+    | "unknown";
+  providerSessionId?: string;
+  providerSubscriptionId?: string;
+  providerPaymentId?: string;
+  productId?: string;
+  amountMinor?: number;
+  currency?: string;
+  currentPeriodStart?: string | null;
+  currentPeriodEnd?: string | null;
+  error?: string;
 }
 
 export interface DodoCheckoutResponse {
@@ -258,27 +279,36 @@ export class AsiystDodoGateway {
         };
       }
 
-      const session = await client.checkoutSessions.create({
-        product_cart: [{ product_id: input.productId, quantity: 1 }],
-        customer: {
-          email: input.userEmail,
-          name: input.userName || input.userEmail.split("@")[0] || "Asiyst Customer",
+      const session = await client.checkoutSessions.create(
+        {
+          product_cart: [{ product_id: input.productId, quantity: 1 }],
+          customer: {
+            email: input.userEmail,
+            name:
+              input.userName ||
+              input.userEmail.split("@")[0] ||
+              "Asiyst Customer",
+          },
+          billing_currency: "USD",
+          feature_flags: {
+            allow_currency_selection: false,
+            allow_discount_code: false,
+          },
+          metadata: {
+            organization_id: input.organizationId,
+            subscription_id: input.subscriptionId,
+            order_id: input.orderId,
+            plan_id: input.planSlug,
+            user_id: input.userId,
+            type: "organization_subscription",
+          },
+          return_url: input.successUrl,
         },
-        billing_currency: "USD",
-        feature_flags: {
-          allow_currency_selection: false,
-          allow_discount_code: false,
+        {
+          idempotencyKey:
+            input.idempotencyKey || `asiyst_checkout_${input.orderId}`,
         },
-        metadata: {
-          organization_id: input.organizationId,
-          subscription_id: input.subscriptionId,
-          order_id: input.orderId,
-          plan_id: input.planSlug,
-          user_id: input.userId,
-          type: "organization_subscription",
-        },
-        return_url: input.successUrl,
-      });
+      );
 
       if (!session.checkout_url) {
         return {
@@ -383,6 +413,184 @@ export class AsiystDodoGateway {
           err instanceof Error
             ? err.message
             : "Unable to change subscription plan with Dodo Payments.",
+      };
+    }
+  }
+
+  /**
+   * Queries Dodo Payments server-to-server to reconcile uncertain or delayed
+   * checkout/subscription/payment states (Phase 12 failure recovery).
+   */
+  async retrieveAuthoritativeStatus(input: {
+    providerSessionId?: string | null;
+    providerSubscriptionId?: string | null;
+    providerPaymentId?: string | null;
+  }): Promise<DodoAuthoritativeStatus> {
+    if (!this.getApiKey()) {
+      return {
+        ok: false,
+        outcome: "unknown",
+        error: "Dodo Payments API key is not configured.",
+      };
+    }
+
+    const client = this.getClient();
+
+    try {
+      let resolvedPaymentId = input.providerPaymentId?.trim() || "";
+      let resolvedSubId = input.providerSubscriptionId?.trim() || "";
+      let sessionStatus = "";
+
+      if (input.providerSessionId?.trim()) {
+        const sessionData = (await client.checkoutSessions.retrieve(
+          input.providerSessionId.trim(),
+        )) as unknown as Record<string, unknown>;
+
+        sessionStatus = String(
+          sessionData.payment_status || sessionData.status || "",
+        ).toLowerCase();
+        if (!resolvedPaymentId && typeof sessionData.payment_id === "string") {
+          resolvedPaymentId = sessionData.payment_id;
+        }
+        if (
+          !resolvedSubId &&
+          typeof sessionData.subscription_id === "string"
+        ) {
+          resolvedSubId = sessionData.subscription_id;
+        }
+      }
+
+      if (resolvedPaymentId) {
+        const payment = (await client.payments.retrieve(
+          resolvedPaymentId,
+        )) as unknown as Record<string, unknown>;
+        const pStatus = String(payment.status || "").toLowerCase();
+        const subFromPay =
+          typeof payment.subscription_id === "string"
+            ? payment.subscription_id
+            : resolvedSubId;
+
+        let periodStart: string | null = null;
+        let periodEnd: string | null = null;
+        let productId: string | undefined;
+
+        if (subFromPay) {
+          try {
+            const sub = (await client.subscriptions.retrieve(
+              subFromPay,
+            )) as unknown as Record<string, unknown>;
+            periodStart = validIsoDate(sub.previous_billing_date);
+            periodEnd = validIsoDate(sub.next_billing_date);
+            if (typeof sub.product_id === "string") {
+              productId = sub.product_id;
+            }
+          } catch {
+            // Subscription details optional if payment already verified
+          }
+        }
+
+        const totalAmount = Number(payment.total_amount ?? 0);
+        const currency = String(payment.currency || "USD").toUpperCase();
+
+        if (pStatus === "succeeded") {
+          return {
+            ok: true,
+            outcome: "succeeded",
+            providerSessionId: input.providerSessionId || undefined,
+            providerSubscriptionId: subFromPay || undefined,
+            providerPaymentId: resolvedPaymentId,
+            productId,
+            amountMinor: Number.isFinite(totalAmount)
+              ? Math.round(totalAmount)
+              : undefined,
+            currency,
+            currentPeriodStart: periodStart,
+            currentPeriodEnd: periodEnd,
+          };
+        }
+
+        if (pStatus === "failed") {
+          return {
+            ok: true,
+            outcome: "failed",
+            providerPaymentId: resolvedPaymentId,
+          };
+        }
+        if (pStatus === "cancelled" || pStatus === "canceled") {
+          return {
+            ok: true,
+            outcome: "cancelled",
+            providerPaymentId: resolvedPaymentId,
+          };
+        }
+
+        return {
+          ok: true,
+          outcome: "pending",
+          providerPaymentId: resolvedPaymentId,
+          providerSubscriptionId: subFromPay || undefined,
+        };
+      }
+
+      if (resolvedSubId) {
+        const sub = (await client.subscriptions.retrieve(
+          resolvedSubId,
+        )) as unknown as Record<string, unknown>;
+        const sStatus = String(sub.status || "").toLowerCase();
+        const totalAmount = Number(
+          sub.recurring_pre_tax_amount ?? sub.total_amount ?? 0,
+        );
+        const currency = String(sub.currency || "USD").toUpperCase();
+
+        if (sStatus === "active") {
+          return {
+            ok: true,
+            outcome: "succeeded",
+            providerSessionId: input.providerSessionId || undefined,
+            providerSubscriptionId: resolvedSubId,
+            productId:
+              typeof sub.product_id === "string" ? sub.product_id : undefined,
+            amountMinor: Number.isFinite(totalAmount)
+              ? Math.round(totalAmount)
+              : undefined,
+            currency,
+            currentPeriodStart: validIsoDate(sub.previous_billing_date),
+            currentPeriodEnd: validIsoDate(sub.next_billing_date),
+          };
+        }
+
+        if (sStatus === "failed") {
+          return { ok: true, outcome: "failed" };
+        }
+        if (sStatus === "cancelled" || sStatus === "canceled") {
+          return { ok: true, outcome: "cancelled" };
+        }
+        if (sStatus === "expired") {
+          return { ok: true, outcome: "expired" };
+        }
+
+        return { ok: true, outcome: "pending", providerSubscriptionId: resolvedSubId };
+      }
+
+      if (sessionStatus === "expired") {
+        return { ok: true, outcome: "expired" };
+      }
+      if (sessionStatus === "cancelled" || sessionStatus === "canceled") {
+        return { ok: true, outcome: "cancelled" };
+      }
+      if (sessionStatus === "failed") {
+        return { ok: true, outcome: "failed" };
+      }
+
+      return { ok: true, outcome: "pending" };
+    } catch (err) {
+      return {
+        ok: false,
+        outcome: "unknown",
+        error:
+          err instanceof Error
+            ? err.message
+            : "Unable to query Dodo Payments reconciliation status.",
       };
     }
   }

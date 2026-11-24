@@ -46,14 +46,19 @@ export default function AccountLayout({
 
   React.useEffect(() => {
     let active = true;
-    fetch("/api/v1/auth/session")
+    const returnPath = pathname || "/account";
+    fetch(`/api/v1/auth/session?returnPath=${encodeURIComponent(returnPath)}`, {
+      cache: "no-store",
+    })
       .then((res) => res.json())
       .then((body) => {
         if (!active) return;
         setAuth({
           loading: false,
           authenticated: Boolean(body?.data?.authenticated),
-          loginUrl: body?.data?.loginUrl || `${MAIN_APP_URL}/login`,
+          loginUrl:
+            body?.data?.loginUrl ||
+            `${MAIN_APP_URL}/api/v1/auth/sso/plan/start?returnPath=${encodeURIComponent(returnPath)}&source=direct_plan_login`,
         });
       })
       .catch(() => {
@@ -61,14 +66,14 @@ export default function AccountLayout({
           setAuth({
             loading: false,
             authenticated: false,
-            loginUrl: `${MAIN_APP_URL}/login`,
+            loginUrl: `${MAIN_APP_URL}/api/v1/auth/sso/plan/start?returnPath=${encodeURIComponent(returnPath)}&source=direct_plan_login`,
           });
         }
       });
     return () => {
       active = false;
     };
-  }, []);
+  }, [pathname]);
 
   return (
     <div className="min-h-screen flex flex-col bg-[#F9F9F9] text-[#3F434C]">

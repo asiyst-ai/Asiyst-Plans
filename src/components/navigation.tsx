@@ -4,12 +4,12 @@ import * as React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  Sparkles,
   LayoutDashboard,
   CreditCard,
   HelpCircle,
   LogIn,
 } from "lucide-react";
+import { AsiystPlanLogoMark } from "@/components/brand-logo";
 
 const MAIN_APP_URL =
   process.env.NEXT_PUBLIC_MAIN_APP_URL || "https://asiyst.com";
@@ -20,29 +20,44 @@ export function PlanNavbar() {
     loaded: boolean;
     authenticated: boolean;
     email?: string;
-  }>({ loaded: false, authenticated: false });
+    organizationName?: string;
+    loginUrl: string;
+  }>({
+    loaded: false,
+    authenticated: false,
+    loginUrl: `${MAIN_APP_URL}/api/v1/auth/sso/plan/start?returnPath=%2Fplans&source=direct_plan_login`,
+  });
 
   React.useEffect(() => {
     let active = true;
-    fetch("/api/v1/auth/session")
+    const returnPath = pathname || "/plans";
+    fetch(`/api/v1/auth/session?returnPath=${encodeURIComponent(returnPath)}`, {
+      cache: "no-store",
+    })
       .then((res) => res.json())
       .then((body) => {
         if (!active) return;
+        const data = body?.data;
         setAuthState({
           loaded: true,
-          authenticated: Boolean(body?.data?.authenticated),
-          email: body?.data?.user?.email,
+          authenticated: Boolean(data?.authenticated),
+          email: data?.user?.email,
+          organizationName: data?.organization?.name,
+          loginUrl:
+            data?.loginUrl ||
+            `${MAIN_APP_URL}/api/v1/auth/sso/plan/start?returnPath=${encodeURIComponent(returnPath)}&source=direct_plan_login`,
         });
       })
       .catch(() => {
-        if (active) setAuthState({ loaded: true, authenticated: false });
+        if (active) {
+          setAuthState((prev) => ({ ...prev, loaded: true, authenticated: false }));
+        }
       });
     return () => {
       active = false;
     };
-  }, []);
+  }, [pathname]);
 
-  // Requirement 3: Removed "Billing" from the header center
   const navLinks = [
     { href: "/products", label: "Products" },
     { href: "/plans", label: "Plans" },
@@ -55,14 +70,18 @@ export function PlanNavbar() {
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
         <div className="flex items-center gap-8">
           <Link href="/" className="flex items-center gap-2.5 group">
-            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#3F434C] text-[#C6F36A] font-bold shadow-xs transition group-hover:scale-105">
-              <Sparkles className="h-4 w-4" />
-            </span>
+            <AsiystPlanLogoMark
+              size={34}
+              className="shadow-xs transition-transform duration-200 group-hover:scale-105"
+            />
             <div className="flex flex-col">
-              <span className="text-base font-bold tracking-tight text-[#3F434C] leading-none">
-                Asiyst <span className="font-normal text-[#69736C]">Plan</span>
+              <span className="text-base font-extrabold tracking-tight text-[#171D1B] leading-none">
+                Asiyst{" "}
+                <span className="rounded bg-[#C6F36A]/45 px-1.5 py-0.5 text-xs font-bold uppercase tracking-wider text-[#171D1B]">
+                  Plan
+                </span>
               </span>
-              <span className="text-[10px] font-mono text-[#69736C] tracking-wider">
+              <span className="mt-0.5 text-[10px] font-mono text-[#69736C] tracking-wider">
                 plan.asiyst.com
               </span>
             </div>
@@ -102,14 +121,16 @@ export function PlanNavbar() {
           {authState.authenticated ? (
             <Link
               href="/account"
-              className="inline-flex items-center gap-1.5 rounded-lg bg-[#3F434C] px-4 py-2 text-xs font-semibold text-[#FCFCFD] hover:bg-[#2d3037] transition shadow-xs"
+              className="inline-flex items-center gap-2 rounded-lg bg-[#3F434C] px-3.5 py-2 text-xs font-semibold text-[#FCFCFD] hover:bg-[#2d3037] transition shadow-xs"
             >
               <LayoutDashboard className="h-3.5 w-3.5 text-[#C6F36A]" />
-              <span>My Account</span>
+              <span className="max-w-[160px] truncate">
+                {authState.organizationName || authState.email || "My Account"}
+              </span>
             </Link>
           ) : (
             <a
-              href={`${MAIN_APP_URL}/login`}
+              href={authState.loginUrl}
               className="inline-flex items-center gap-1.5 rounded-lg bg-[#3F434C] px-4 py-2 text-xs font-semibold text-[#FCFCFD] hover:bg-[#2d3037] transition shadow-xs"
             >
               <LogIn className="h-3.5 w-3.5 text-[#C6F36A]" />
@@ -128,9 +149,11 @@ export function PlanFooter() {
       <div className="mx-auto max-w-7xl px-4 py-12 sm:px-6 lg:px-8">
         <div className="grid grid-cols-1 gap-8 md:grid-cols-4">
           <div className="space-y-3">
-            <div className="flex items-center gap-2">
-              <span className="inline-block h-3 w-3 rounded-full bg-[#C6F36A] ring-2 ring-[#3F434C]" />
-              <span className="text-base font-bold text-[#3F434C]">Asiyst Plan</span>
+            <div className="flex items-center gap-2.5">
+              <AsiystPlanLogoMark size={28} />
+              <span className="text-base font-extrabold text-[#171D1B]">
+                Asiyst Plan
+              </span>
             </div>
             <p className="text-xs leading-relaxed text-[#69736C]">
               Centralized subscription, billing, and organization entitlement management for the Asiyst ecosystem.

@@ -1,13 +1,16 @@
 import type { NextConfig } from "next";
 import { initOpenNextCloudflareForDev } from "@opennextjs/cloudflare";
 
-initOpenNextCloudflareForDev();
+if (process.env.NODE_ENV === "development") {
+  initOpenNextCloudflareForDev();
+}
 
 const nextConfig: NextConfig = {
   compress: true,
   poweredByHeader: false,
   skipTrailingSlashRedirect: true,
   experimental: {
+    cpus: 1,
     optimizePackageImports: ["lucide-react", "date-fns"],
   },
   async headers() {

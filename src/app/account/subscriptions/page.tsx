@@ -128,6 +128,13 @@ function SubscriptionsManagerContent() {
           router.push(`/checkout?plan=${targetPlan}`);
           return;
         }
+        if (
+          res.status === 401 &&
+          typeof payload?.error?.details?.loginUrl === "string"
+        ) {
+          window.location.assign(payload.error.details.loginUrl);
+          return;
+        }
         setActionFeedback({
           type: "error",
           text: payload?.error?.message || `Unable to perform ${action}.`,

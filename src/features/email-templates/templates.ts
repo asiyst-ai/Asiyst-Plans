@@ -474,14 +474,14 @@ export function renderBillingEmailTemplate(
       <td align="center">
         <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width: 560px; background-color: #FCFCFD; border: 1px solid #D0CCC6; border-radius: 16px; overflow: hidden;">
           <tr>
-            <td style="background-color: #3F434C; padding: 20px 32px;">
+            <td style="background-color: #171D1B; padding: 20px 32px;">
               <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
                 <tr>
                   <td>
-                    <span style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background-color: #C6F36A; margin-right: 8px;"></span>
-                    <span style="color: #FCFCFD; font-size: 16px; font-weight: 700; letter-spacing: 0.04em;">ASIYST PLAN</span>
+                    <img src="${escapeHtml(PLAN_APP_BASE_URL)}/asiyst_plan_logo_square_v6.svg" alt="Asiyst Plan" width="24" height="24" style="display: inline-block; width: 24px; height: 24px; border-radius: 6px; vertical-align: middle; margin-right: 10px;" />
+                    <span style="color: #FCFCFD; font-size: 16px; font-weight: 800; letter-spacing: 0.05em; vertical-align: middle;">ASIYST PLAN</span>
                   </td>
-                  <td align="right" style="color: #AAB6B0; font-size: 12px;">
+                  <td align="right" style="color: #C6F36A; font-size: 12px; font-family: monospace;">
                     plan.asiyst.com
                   </td>
                 </tr>

@@ -2,7 +2,8 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { Check, ArrowRight, ShieldAlert, Building2, Sparkles } from "lucide-react";
+import { Check, ArrowRight, ShieldAlert, Building2 } from "lucide-react";
+import { AsiystPlanLogoMark } from "@/components/brand-logo";
 import {
   OFFICIAL_PLAN_LIST,
   PLAN_COMPARISON_ROWS,
@@ -132,9 +133,7 @@ export function PlanCardsGrid({
       {selectedPlanDef && (
         <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border-2 border-[#3F434C] bg-[#FCFCFD] p-5 shadow-xs">
           <div className="flex items-start gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#3F434C] text-[#C6F36A]">
-              <Sparkles className="h-5 w-5" />
-            </div>
+            <AsiystPlanLogoMark size={40} className="shrink-0" />
             <div>
               <p className="text-xs font-mono font-bold uppercase tracking-wider text-[#69736C]">
                 Selected from Asiyst-WEB

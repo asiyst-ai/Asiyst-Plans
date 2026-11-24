@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   DEFAULT_EMAIL_FROM,
   DEFAULT_EMAIL_REPLY_TO,
+  getBillingEmailMetadata,
   isEssentialBillingEmail,
   renderBillingEmailTemplate,
   type EmailTemplatePayload,
@@ -211,6 +212,55 @@ export async function enqueueBillingNotification(
 
     if (inserted?.id) {
       queuedIds.push(String(inserted.id));
+    }
+
+    // Mirror notification into Asiyst-WEB dashboard notification center (`notification_events` + `notifications`)
+    if (recipient.userId) {
+      try {
+        const meta = getBillingEmailMetadata(input.payload);
+        const dashIdempotencyKey = `dash:${idempotencyKey}`;
+        const { data: existingEvent } = await admin
+          .from("notification_events")
+          .select("id")
+          .eq("idempotency_key", dashIdempotencyKey)
+          .maybeSingle();
+
+        if (!existingEvent?.id) {
+          const { data: createdEvt } = await admin
+            .from("notification_events")
+            .insert({
+              user_id: recipient.userId,
+              event_type: input.eventType,
+              category: "billing",
+              entity_type: "organization_subscription",
+              entity_id: input.organizationId,
+              title: meta.headline,
+              description: meta.body,
+              action_url: "/dashboard/settings?tab=billing",
+              metadata: input.payload as unknown as Record<string, unknown>,
+              idempotency_key: dashIdempotencyKey,
+            })
+            .select("id")
+            .maybeSingle();
+
+          await admin.from("notifications").insert({
+            user_id: recipient.userId,
+            event_id: createdEvt?.id || null,
+            event_type: input.eventType,
+            category: "billing",
+            type: input.eventType.includes("failed") || input.eventType.includes("dispute")
+              ? "warning"
+              : "info",
+            title: meta.headline,
+            body: meta.body,
+            action_url: "/dashboard/settings?tab=billing",
+            is_read: false,
+            metadata: input.payload as unknown as Record<string, unknown>,
+          });
+        }
+      } catch {
+        // Non-fatal in isolated mock tests or if dashboard notification table differs
+      }
     }
   }
 
