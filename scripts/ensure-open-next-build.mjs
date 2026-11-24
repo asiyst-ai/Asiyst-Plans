@@ -30,5 +30,5 @@ if (
 console.log(
   "⚙️ .open-next build output not found; running OpenNext Cloudflare build...",
 );
-execSync("npx opennextjs-cloudflare build", { stdio: "inherit" });
+execSync("npx opennextjs-cloudflare build --openNextConfigPath open-next.config.mjs", { stdio: "inherit" });
 execSync("node scripts/sanitize-open-next-env.mjs", { stdio: "inherit" });
