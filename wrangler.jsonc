@@ -61,6 +61,7 @@
 			"name": "asiyst-plans-staging",
 			"workers_dev": true,
 			"preview_urls": true,
+			"routes": [],
 			"assets": {
 				"directory": ".open-next/assets",
 				"binding": "ASSETS"
@@ -86,46 +87,6 @@
 				"NEXT_PUBLIC_MAIN_APP_URL": "https://asiyst.com",
 				"ASIIYST_API_BASE_URL": "https://asiyst.com",
 				"DODO_PAYMENTS_ENVIRONMENT": "test_mode",
-				"EMAIL_PROVIDER": "resend",
-				"RESEND_FROM_EMAIL": "ASIYST <noreply@asiyst.com>",
-				"RESEND_REPLY_TO": "support@asiyst.com"
-			}
-		},
-		"production": {
-			"name": "asiyst-plans",
-			"workers_dev": true,
-			"preview_urls": true,
-			"routes": [
-				{
-					"pattern": "plan.asiyst.com",
-					"custom_domain": true
-				}
-			],
-			"assets": {
-				"directory": ".open-next/assets",
-				"binding": "ASSETS"
-			},
-			"services": [
-				{
-					"binding": "WORKER_SELF_REFERENCE",
-					"service": "asiyst-plans"
-				}
-			],
-			"images": {
-				"binding": "IMAGES"
-			},
-			"triggers": {
-				"crons": [
-					"*/5 * * * *"
-				]
-			},
-			"vars": {
-				"ASIYST_ENVIRONMENT": "production",
-				"NEXT_PUBLIC_ASIYST_ENVIRONMENT": "production",
-				"NEXT_PUBLIC_APP_URL": "https://plan.asiyst.com",
-				"NEXT_PUBLIC_MAIN_APP_URL": "https://asiyst.com",
-				"ASIIYST_API_BASE_URL": "https://asiyst.com",
-				"DODO_PAYMENTS_ENVIRONMENT": "live_mode",
 				"EMAIL_PROVIDER": "resend",
 				"RESEND_FROM_EMAIL": "ASIYST <noreply@asiyst.com>",
 				"RESEND_REPLY_TO": "support@asiyst.com"

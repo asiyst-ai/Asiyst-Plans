@@ -9,6 +9,9 @@ export const metadata: Metadata = {
   description:
     "Explore Asiyst plans, unlock the capabilities you need, and manage your organization subscriptions, entitlements, and billing from one account.",
   metadataBase: new URL("https://plan.asiyst.com"),
+  alternates: {
+    canonical: "./",
+  },
 };
 
 export default function RootLayout({

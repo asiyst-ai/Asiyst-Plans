@@ -15,6 +15,11 @@ export {
 
 const worker = {
   async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    if (url.protocol === "http:" && url.hostname === "plan.asiyst.com") {
+      url.protocol = "https:";
+      return Response.redirect(url.toString(), 308);
+    }
     return openNextWorker.fetch(request, env, ctx);
   },
 

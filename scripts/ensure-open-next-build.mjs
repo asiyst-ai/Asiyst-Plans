@@ -1,34 +1,28 @@
 import { execSync } from "node:child_process";
-import fs from "node:fs";
-import path from "node:path";
 
 /**
- * Ensures `.open-next/worker.js` and `.open-next/assets` exist before `wrangler deploy`
- * or `wrangler dev` runs.
+ * Ensures `.open-next/worker.js` and `.open-next/assets` are freshly built
+ * from the current commit before `wrangler deploy` or `wrangler dev` runs.
  *
- * When Cloudflare Workers Builds (CI) executes `npx wrangler deploy`:
- * - If `opennextjs-cloudflare build` already ran in the CI Build step (or via `opennextjs-cloudflare deploy`),
- *   `.open-next/worker.js` and `.open-next/assets` already exist -> this script skips rebuilding.
- * - If Cloudflare Workers Builds ran `next build` or skipped the OpenNext build step and went straight to
- *   `npx wrangler deploy`, this script automatically runs `npx opennextjs-cloudflare build` and
- *   `node scripts/sanitize-open-next-env.mjs` so `.open-next/assets` and `.open-next/worker.js` are present.
+ * - When invoked via `opennextjs-cloudflare deploy` (`OPEN_NEXT_DEPLOY === "true"`),
+ *   `npm run build:cf` has just completed in the same command chain, so we only
+ *   ensure `next-env.mjs` sanitization and static cache population.
+ * - When invoked directly via `npx wrangler deploy` (such as Cloudflare Workers Builds CI,
+ *   which may restore stale `.open-next` artifacts from its build output cache), we ALWAYS
+ *   run a clean `opennextjs-cloudflare build` so stale cached artifacts can never overwrite
+ *   the current production Worker.
  */
 
-const rootDir = process.cwd();
-const workerJsPath = path.join(rootDir, ".open-next", "worker.js");
-const assetsDirPath = path.join(rootDir, ".open-next", "assets");
-
-if (
-  process.env.OPEN_NEXT_DEPLOY === "true" ||
-  (fs.existsSync(workerJsPath) && fs.existsSync(assetsDirPath))
-) {
-  // Ensure static assets cache is populated and next-env.mjs is sanitized
+if (process.env.OPEN_NEXT_DEPLOY === "true") {
   execSync("node scripts/sanitize-open-next-env.mjs", { stdio: "inherit" });
   process.exit(0);
 }
 
 console.log(
-  "⚙️ .open-next build output not found; running OpenNext Cloudflare build...",
+  "⚙️ Running fresh OpenNext Cloudflare build for current commit...",
 );
-execSync("npx opennextjs-cloudflare build --openNextConfigPath open-next.config.mjs", { stdio: "inherit" });
+execSync(
+  "npx opennextjs-cloudflare build --openNextConfigPath open-next.config.mjs",
+  { stdio: "inherit" },
+);
 execSync("node scripts/sanitize-open-next-env.mjs", { stdio: "inherit" });
