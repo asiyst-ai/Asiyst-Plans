@@ -138,10 +138,11 @@ function CheckoutContent() {
         );
         const body = await res.json();
         const data = body?.data;
+        const isAuthorized = Boolean(data?.purchaseAuthorized);
         setSessionState({
           loading: false,
           authenticated: Boolean(data?.authenticated),
-          purchaseAuthorized: Boolean(data?.purchaseAuthorized),
+          purchaseAuthorized: isAuthorized,
           purchaseAuthStatus: String(
             data?.purchaseAuthorization?.status || "missing",
           ),
@@ -158,6 +159,18 @@ function CheckoutContent() {
             data?.reauthUrl ||
             `${MAIN_APP_URL}/api/v1/auth/sso/plan/start?returnPath=${encodeURIComponent(returnPath)}&plan=${planForReturn}&source=reauth&reauth=1`,
         });
+        if (isAuthorized) {
+          setStatusMessage((prev) =>
+            prev?.type === "purchase_expired" || prev?.type === "login_required"
+              ? null
+              : prev,
+          );
+          if (typeof window !== "undefined" && window.location.search.includes("sso_error=")) {
+            const cleanUrl = new URL(window.location.href);
+            cleanUrl.searchParams.delete("sso_error");
+            window.history.replaceState({}, "", `${cleanUrl.pathname}${cleanUrl.search}`);
+          }
+        }
       } catch {
         setSessionState((prev) => ({
           ...prev,

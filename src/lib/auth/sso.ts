@@ -138,6 +138,14 @@ export function buildAsiystWebSsoUrl(options: {
   return url.toString();
 }
 
+function isSecureCookieEnvironment(): boolean {
+  return (
+    process.env.NODE_ENV === "production" ||
+    process.env.ASIYST_ENVIRONMENT === "production" ||
+    process.env.NEXT_PUBLIC_ASIYST_ENVIRONMENT === "production"
+  );
+}
+
 export function setPlanAuthCookies(
   response: NextResponse,
   tokens: {
@@ -147,7 +155,7 @@ export function setPlanAuthCookies(
     accountMaxAgeSeconds?: number;
   },
 ): void {
-  const isSecure = process.env.NODE_ENV === "production";
+  const isSecure = isSecureCookieEnvironment();
 
   response.cookies.set(PLAN_SESSION_COOKIE, tokens.sessionToken, {
     httpOnly: true,
@@ -167,7 +175,7 @@ export function setPlanAuthCookies(
 }
 
 export function clearPlanPurchaseCookieOnly(response: NextResponse): void {
-  const isSecure = process.env.NODE_ENV === "production";
+  const isSecure = isSecureCookieEnvironment();
   response.cookies.set(PLAN_PURCHASE_AUTH_COOKIE, "", {
     httpOnly: true,
     secure: isSecure,
@@ -178,7 +186,7 @@ export function clearPlanPurchaseCookieOnly(response: NextResponse): void {
 }
 
 export function clearAllPlanAuthCookies(response: NextResponse): void {
-  const isSecure = process.env.NODE_ENV === "production";
+  const isSecure = isSecureCookieEnvironment();
   for (const name of [PLAN_SESSION_COOKIE, PLAN_PURCHASE_AUTH_COOKIE]) {
     response.cookies.set(name, "", {
       httpOnly: true,

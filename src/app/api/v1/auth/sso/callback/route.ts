@@ -22,6 +22,9 @@ export async function GET(request: NextRequest) {
   const consumed = await consumeSsoHandoffCode({ code, state });
 
   if (!consumed.ok) {
+    console.error(
+      `[asiyst-plan:sso-callback] Verification failed (${consumed.status} ${consumed.code}): ${consumed.message}`,
+    );
     if (wantsJson) {
       return jsonError(consumed.status, consumed.code, consumed.message);
     }

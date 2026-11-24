@@ -30,8 +30,24 @@ export function PlanNavbar() {
 
   React.useEffect(() => {
     let active = true;
-    const returnPath = pathname || "/plans";
-    fetch(`/api/v1/auth/session?returnPath=${encodeURIComponent(returnPath)}`, {
+    let returnPath = pathname || "/plans";
+    let planParam = "";
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const candidatePlan = params.get("plan") || params.get("selected") || "";
+      if (candidatePlan) {
+        planParam = candidatePlan;
+        const cleanSearch = new URLSearchParams();
+        cleanSearch.set(
+          pathname === "/checkout" ? "plan" : "selected",
+          candidatePlan,
+        );
+        returnPath = `${pathname || "/plans"}?${cleanSearch.toString()}`;
+      }
+    }
+    const query = new URLSearchParams({ returnPath });
+    if (planParam) query.set("plan", planParam);
+    fetch(`/api/v1/auth/session?${query.toString()}`, {
       cache: "no-store",
     })
       .then((res) => res.json())

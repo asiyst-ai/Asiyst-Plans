@@ -48,6 +48,10 @@
 	"vars": {
 		"ASIYST_ENVIRONMENT": "production",
 		"NEXT_PUBLIC_ASIYST_ENVIRONMENT": "production",
+		"SUPABASE_URL": "https://nqhxpgsjofzqudyqkqib.supabase.co",
+		"NEXT_PUBLIC_SUPABASE_URL": "https://nqhxpgsjofzqudyqkqib.supabase.co",
+		"SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5xaHhwZ3Nqb2Z6cXVkeXFrcWliIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc2Nzc4NjcsImV4cCI6MjEwMzI1Mzg2N30.KGlcT_Kciufel7FLFJxKdD4bHsymNUojsbZTworllgY",
+		"NEXT_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5xaHhwZ3Nqb2Z6cXVkeXFrcWliIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc2Nzc4NjcsImV4cCI6MjEwMzI1Mzg2N30.KGlcT_Kciufel7FLFJxKdD4bHsymNUojsbZTworllgY",
 		"NEXT_PUBLIC_APP_URL": "https://plan.asiyst.com",
 		"NEXT_PUBLIC_MAIN_APP_URL": "https://asiyst.com",
 		"ASIIYST_API_BASE_URL": "https://asiyst.com",
@@ -83,6 +87,10 @@
 			"vars": {
 				"ASIYST_ENVIRONMENT": "staging",
 				"NEXT_PUBLIC_ASIYST_ENVIRONMENT": "staging",
+				"SUPABASE_URL": "https://nqhxpgsjofzqudyqkqib.supabase.co",
+				"NEXT_PUBLIC_SUPABASE_URL": "https://nqhxpgsjofzqudyqkqib.supabase.co",
+				"SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5xaHhwZ3Nqb2Z6cXVkeXFrcWliIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc2Nzc4NjcsImV4cCI6MjEwMzI1Mzg2N30.KGlcT_Kciufel7FLFJxKdD4bHsymNUojsbZTworllgY",
+				"NEXT_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5xaHhwZ3Nqb2Z6cXVkeXFrcWliIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc2Nzc4NjcsImV4cCI6MjEwMzI1Mzg2N30.KGlcT_Kciufel7FLFJxKdD4bHsymNUojsbZTworllgY",
 				"NEXT_PUBLIC_APP_URL": "https://asiyst-plans-staging.workers.dev",
 				"NEXT_PUBLIC_MAIN_APP_URL": "https://asiyst.com",
 				"ASIIYST_API_BASE_URL": "https://asiyst.com",
