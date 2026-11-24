@@ -1,0 +1,51 @@
+# ================================================================
+# Asiyst Plan — Local Cloudflare Worker Preview (.dev.vars.example)
+# ================================================================
+# Copy to .dev.vars for local `npm run preview` / `wrangler dev`.
+# NEVER commit .dev.vars or real secrets to version control.
+
+NEXTJS_ENV=development
+ASIYST_ENVIRONMENT=production
+NEXT_PUBLIC_ASIYST_ENVIRONMENT=production
+
+# Public Supabase Configuration
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+
+# Server-Only Supabase Configuration
+SUPABASE_URL=
+SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_ROLE_KEY=
+
+# Cross-Subdomain Cookie Domain (Optional: e.g. .asiyst.com in production)
+NEXT_PUBLIC_AUTH_COOKIE_DOMAIN=
+AUTH_COOKIE_DOMAIN=
+
+# Application URLs
+NEXT_PUBLIC_APP_URL=https://plan.asiyst.com
+NEXT_PUBLIC_MAIN_APP_URL=https://asiyst.com
+ASIIYST_API_BASE_URL=https://asiyst.com
+
+# Internal & Scheduled Worker Secrets
+ASIYST_INTERNAL_SECRET=
+CRON_SECRET=
+ASIYST_EMAIL_INTERNAL_SECRET=
+ADMIN_SECRET_KEY=
+
+# Dodo Payments
+DODO_PAYMENTS_ENVIRONMENT=test_mode
+DODO_PAYMENTS_API_KEY=
+DODO_PAYMENTS_WEBHOOK_SECRET=
+DODO_PRODUCT_ID_PULSE=
+DODO_PRICE_ID_PULSE=
+DODO_PRODUCT_ID_VECTOR=
+DODO_PRICE_ID_VECTOR=
+DODO_PRODUCT_ID_QUANTUM=
+DODO_PRICE_ID_QUANTUM=
+
+# Resend Transactional Email
+EMAIL_PROVIDER=resend
+RESEND_API_KEY=
+RESEND_FROM_EMAIL="ASIYST <noreply@asiyst.com>"
+RESEND_REPLY_TO="support@asiyst.com"
+EMAIL_WEBHOOK_SECRET=

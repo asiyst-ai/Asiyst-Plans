@@ -1,0 +1,50 @@
+{
+  "name": "asiyst-plan",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Central Subscription Platform, Dodo Payments, Entitlement Engine & Automated Billing Email System for Asiyst",
+  "scripts": {
+    "dev": "next dev --port 3001",
+    "build": "next build",
+    "build:cf": "opennextjs-cloudflare build && node scripts/sanitize-open-next-env.mjs",
+    "start": "next start --port 3001",
+    "preview": "npm run build:cf && opennextjs-cloudflare preview",
+    "preview:worker": "opennextjs-cloudflare preview",
+    "deploy": "npm run build:cf && opennextjs-cloudflare deploy",
+    "deploy:staging": "opennextjs-cloudflare build --env staging && node scripts/sanitize-open-next-env.mjs && opennextjs-cloudflare deploy --env staging",
+    "deploy:production": "opennextjs-cloudflare build --env production && node scripts/sanitize-open-next-env.mjs && opennextjs-cloudflare deploy --env production",
+    "upload:staging": "opennextjs-cloudflare build --env staging && node scripts/sanitize-open-next-env.mjs && opennextjs-cloudflare upload --env staging",
+    "upload:production": "opennextjs-cloudflare build --env production && node scripts/sanitize-open-next-env.mjs && opennextjs-cloudflare upload --env production",
+    "cf-typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts",
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "node --conditions=react-server --import tsx --test tests/asiyst-plan.test.ts"
+  },
+  "dependencies": {
+    "@supabase/ssr": "^0.12.5",
+    "@supabase/supabase-js": "^2.112.4",
+    "clsx": "^2.1.1",
+    "date-fns": "^4.4.0",
+    "dodopayments": "^2.51.0",
+    "lucide-react": "^1.34.0",
+    "next": "^16.4.6",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "server-only": "^0.0.1",
+    "tailwind-merge": "^3.6.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@opennextjs/cloudflare": "^1.20.18",
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "^16.4.6",
+    "tailwindcss": "^4",
+    "tsx": "^4.20.6",
+    "typescript": "^5",
+    "wrangler": "^4.167.0"
+  }
+}
