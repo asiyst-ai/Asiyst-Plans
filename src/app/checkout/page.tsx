@@ -81,6 +81,9 @@ function CheckoutContent() {
     userEmail?: string;
     userFullName?: string;
     organizationName?: string;
+    activePlanSlug: OfficialPlanSlug | null;
+    hasSubscriptionRecord: boolean;
+    isPaidActive: boolean;
     loginUrl: string;
     reauthUrl: string;
   }>({
@@ -89,6 +92,9 @@ function CheckoutContent() {
     purchaseAuthorized: false,
     purchaseAuthStatus: "missing",
     remainingSeconds: 0,
+    activePlanSlug: null,
+    hasSubscriptionRecord: false,
+    isPaidActive: false,
     loginUrl: `${MAIN_APP_URL}/api/v1/auth/sso/plan/start?returnPath=%2Fcheckout&source=direct_plan_login`,
     reauthUrl: `${MAIN_APP_URL}/api/v1/auth/sso/plan/start?returnPath=%2Fcheckout&source=reauth&reauth=1`,
   });
@@ -139,6 +145,12 @@ function CheckoutContent() {
         const body = await res.json();
         const data = body?.data;
         const isAuthorized = Boolean(data?.purchaseAuthorized);
+        const activePlan = normalizeOfficialPlanSlug(
+          data?.activeSubscription?.plan,
+        );
+        const hasSubRecord = Boolean(
+          data?.activeSubscription?.hasSubscriptionRecord,
+        );
         setSessionState({
           loading: false,
           authenticated: Boolean(data?.authenticated),
@@ -152,6 +164,9 @@ function CheckoutContent() {
           userEmail: data?.user?.email,
           userFullName: data?.user?.fullName,
           organizationName: data?.organization?.name,
+          activePlanSlug: activePlan,
+          hasSubscriptionRecord: hasSubRecord,
+          isPaidActive: Boolean(data?.activeSubscription?.isPaidActive),
           loginUrl:
             data?.loginUrl ||
             `${MAIN_APP_URL}/api/v1/auth/sso/plan/start?returnPath=${encodeURIComponent(returnPath)}&plan=${planForReturn}&source=direct_plan_login`,
@@ -159,7 +174,7 @@ function CheckoutContent() {
             data?.reauthUrl ||
             `${MAIN_APP_URL}/api/v1/auth/sso/plan/start?returnPath=${encodeURIComponent(returnPath)}&plan=${planForReturn}&source=reauth&reauth=1`,
         });
-        if (isAuthorized) {
+        if (isAuthorized || (hasSubRecord && activePlan === planForReturn)) {
           setStatusMessage((prev) =>
             prev?.type === "purchase_expired" || prev?.type === "login_required"
               ? null
@@ -373,10 +388,27 @@ function CheckoutContent() {
     true,
   );
 
+  const isSelectedPlanAlreadyActive =
+    sessionState.authenticated &&
+    ((sessionState.hasSubscriptionRecord &&
+      sessionState.activePlanSlug === selectedSlug) ||
+      (statusMessage?.type === "success" && !returnedOrderId));
+
+  const isPurchaseCompletedNeedsConfirm =
+    sessionState.authenticated &&
+    !sessionState.purchaseAuthorized &&
+    !isSelectedPlanAlreadyActive &&
+    statusMessage?.type !== "success" &&
+    sessionState.purchaseAuthStatus === "completed";
+
   const isPurchaseExpired =
     sessionState.authenticated &&
     !sessionState.purchaseAuthorized &&
-    sessionState.purchaseAuthStatus !== "missing";
+    !isSelectedPlanAlreadyActive &&
+    statusMessage?.type !== "success" &&
+    (sessionState.purchaseAuthStatus === "expired" ||
+      sessionState.purchaseAuthStatus === "abandoned" ||
+      sessionState.purchaseAuthStatus === "revoked");
 
   async function handleCheckoutSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -664,11 +696,20 @@ function CheckoutContent() {
                       : "border-[#D0CCC6] bg-[#F9F9F9] hover:border-[#3F434C]/60"
                   }`}
                 >
-                  <div className="flex items-center justify-between w-full">
-                    <span className="text-sm font-bold text-[#3F434C]">
-                      {plan.name}
-                    </span>
-                    <span className="text-sm font-extrabold text-[#3F434C]">
+                  <div className="flex items-center justify-between w-full gap-2">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-sm font-bold text-[#3F434C] truncate">
+                        {plan.name}
+                      </span>
+                      {sessionState.authenticated &&
+                        sessionState.hasSubscriptionRecord &&
+                        sessionState.activePlanSlug === plan.slug && (
+                          <span className="shrink-0 rounded-full bg-[#171D1B] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-[#C6F36A]">
+                            Active
+                          </span>
+                        )}
+                    </div>
+                    <span className="text-sm font-extrabold text-[#3F434C] shrink-0">
                       {formatMinorCurrency(plan.priceMinor)}
                       {plan.billingInterval === "month" ? "/mo" : ""}
                     </span>
@@ -821,29 +862,58 @@ function CheckoutContent() {
             </div>
           )}
 
+          {/* Current Active Plan / Just Activated Confirmation */}
+          {!sessionState.loading && isSelectedPlanAlreadyActive && (
+            <div className="rounded-xl border-2 border-emerald-700/35 bg-emerald-50 p-4 text-xs text-emerald-950 space-y-2">
+              <div className="flex items-center gap-2 font-bold">
+                <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-700" />
+                <span>
+                  {statusMessage?.type === "success"
+                    ? `${selectedPlan.name} Activated`
+                    : "Current Active Plan"}
+                </span>
+              </div>
+              <p className="leading-relaxed">
+                {statusMessage?.type === "success"
+                  ? statusMessage.text
+                  : `${selectedPlan.name} is active for ${sessionState.organizationName || "your organization"}. Your entitlements are live in Asiyst-WEB.`}
+              </p>
+              {selectedSlug !== "quantum" && (
+                <p className="text-[11px] text-emerald-900/80">
+                  Want expanded limits? Select a higher tier on the left to upgrade anytime.
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Previous Paid Checkout Completed — Re-confirm for Another Plan Change */}
+          {!sessionState.loading && isPurchaseCompletedNeedsConfirm && (
+            <div className="rounded-xl border border-[#D0CCC6] bg-[#F9F9F9] p-4 text-xs text-[#3F434C] space-y-2">
+              <div className="flex items-center gap-2 font-bold">
+                <ShieldCheck className="h-4 w-4 shrink-0 text-[#3F434C]" />
+                <span>Confirm account for a new plan change</span>
+              </div>
+              <p className="text-[#69736C] leading-relaxed">
+                Your previous checkout authorization was already used. Confirm your Asiyst account below to unlock purchasing for <strong>{selectedPlan.name}</strong>.
+              </p>
+            </div>
+          )}
+
           {/* Expired Short-Lived Purchase Authorization Prompt (Phase 3 & 9) */}
           {!sessionState.loading && isPurchaseExpired && (
-            <div className="rounded-xl border-2 border-amber-700/50 bg-amber-50 p-4 text-xs text-amber-950 space-y-3">
+            <div className="rounded-xl border-2 border-amber-700/50 bg-amber-50 p-4 text-xs text-amber-950 space-y-2">
               <div className="flex items-center gap-2 font-bold">
                 <Clock className="h-4 w-4 shrink-0 text-amber-800" />
                 <span>Purchase session expired</span>
               </div>
               <p className="leading-relaxed">
-                For your financial security, subscription purchase sessions expire after 15 minutes of inactivity. No new payment was initiated, and your main Asiyst dashboard session remains active. Sign in again to continue purchasing.
+                For your financial security, subscription purchase sessions expire after 15 minutes of inactivity. No new payment was initiated, and your main Asiyst dashboard session remains active.
               </p>
-              <a
-                href={sessionState.reauthUrl}
-                className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#171D1B] px-4 py-2.5 text-xs font-bold text-[#FCFCFD] hover:bg-[#2d3431] transition"
-              >
-                <LogIn className="h-3.5 w-3.5 text-[#C6F36A]" />
-                <span>Sign in again to continue purchasing</span>
-                <ArrowRight className="h-3.5 w-3.5" />
-              </a>
             </div>
           )}
 
           {/* Status Messages (Pending, Failed, Cancelled, Info) */}
-          {statusMessage && (
+          {statusMessage && !(isSelectedPlanAlreadyActive && statusMessage.type === "success") && (
             <div
               className={`rounded-xl border p-4 text-xs space-y-2.5 ${
                 statusMessage.type === "success"
@@ -858,6 +928,8 @@ function CheckoutContent() {
               <div className="flex items-center gap-2 font-bold">
                 {statusMessage.type === "pending" ? (
                   <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                ) : statusMessage.type === "success" ? (
+                  <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-700" />
                 ) : statusMessage.type === "error" ? (
                   <XCircle className="h-4 w-4 shrink-0" />
                 ) : (
@@ -885,7 +957,7 @@ function CheckoutContent() {
               )}
 
               {(statusMessage.type === "login_required" ||
-                statusMessage.type === "purchase_expired") && (
+                (statusMessage.type === "purchase_expired" && !isPurchaseExpired)) && (
                 <a
                   href={
                     statusMessage.type === "purchase_expired"
@@ -912,13 +984,35 @@ function CheckoutContent() {
           )}
 
           {/* Primary Action Button */}
-          {isPurchaseExpired ? (
+          {isSelectedPlanAlreadyActive ? (
+            <div className="space-y-2.5">
+              <a
+                href={`${MAIN_APP_URL}/dashboard`}
+                className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#171D1B] px-5 py-3.5 text-sm font-bold text-[#FCFCFD] hover:bg-[#2a2d33] transition shadow-xs"
+              >
+                <CheckCircle2 className="h-4 w-4 text-[#C6F36A]" />
+                <span>Open Asiyst Dashboard</span>
+                <ArrowRight className="h-4 w-4" />
+              </a>
+              <Link
+                href="/account/subscriptions"
+                className="flex w-full items-center justify-center gap-2 rounded-xl border border-[#3F434C] bg-[#F9F9F9] px-4 py-2.5 text-xs font-bold text-[#3F434C] hover:bg-[#D0CCC6]/35 transition"
+              >
+                <span>Manage Subscription</span>
+              </Link>
+            </div>
+          ) : isPurchaseExpired || isPurchaseCompletedNeedsConfirm ? (
             <a
               href={sessionState.reauthUrl}
               className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#171D1B] px-5 py-3.5 text-sm font-bold text-[#FCFCFD] hover:bg-[#2a2d33] transition shadow-xs"
             >
               <LogIn className="h-4 w-4 text-[#C6F36A]" />
-              <span>Sign in Again to Unlock Purchase</span>
+              <span>
+                {isPurchaseCompletedNeedsConfirm
+                  ? `Confirm Account to Purchase ${selectedPlan.name}`
+                  : "Sign in Again to Continue Purchase"}
+              </span>
+              <ArrowRight className="h-4 w-4" />
             </a>
           ) : (
             <button

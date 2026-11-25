@@ -90,8 +90,7 @@ export async function POST(request: NextRequest) {
     await auth.admin
       .from("plan_purchase_authorizations")
       .update({
-        status: "completed",
-        completed_at: new Date().toISOString(),
+        last_verified_at: new Date().toISOString(),
       })
       .eq("id", auth.purchaseAuthorization.id)
       .in("status", ["active", "checkout_initiated"]);

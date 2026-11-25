@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { getOrganizationEffectiveEntitlements } from "@/features/entitlements/engine";
 import {
   requireAuthenticatedUser,
   resolveUserOrganizationAccess,
@@ -42,6 +43,7 @@ export async function GET(request: NextRequest) {
           },
           user: null,
           organization: null,
+          activeSubscription: null,
           loginUrl,
           reauthUrl,
         },
@@ -61,6 +63,26 @@ export async function GET(request: NextRequest) {
     false,
   );
 
+  let activeSubscription: {
+    hasSubscriptionRecord: boolean;
+    plan: string;
+    status: string;
+    isPaidActive: boolean;
+  } | null = null;
+
+  if (!("error" in orgAccess)) {
+    const { entitlements } = await getOrganizationEffectiveEntitlements(
+      auth.admin,
+      orgAccess.organization.id,
+    );
+    activeSubscription = {
+      hasSubscriptionRecord: Boolean(entitlements.subscriptionId),
+      plan: entitlements.plan,
+      status: entitlements.status,
+      isPaidActive: entitlements.isPaidActive,
+    };
+  }
+
   return NextResponse.json(
     {
       data: {
@@ -70,6 +92,7 @@ export async function GET(request: NextRequest) {
         user: auth.user,
         organization: "error" in orgAccess ? null : orgAccess.organization,
         membership: "error" in orgAccess ? null : orgAccess.membership,
+        activeSubscription,
         loginUrl,
         reauthUrl,
       },
