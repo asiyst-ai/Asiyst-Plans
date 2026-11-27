@@ -36,7 +36,7 @@ export async function GET(request: NextRequest, context: Context) {
       .maybeSingle(),
     auth.admin
       .from("organization_members")
-      .select("id, user_id, role, can_manage_billing, created_at")
+      .select("id, user_id, role, can_manage_billing, permissions, status, created_at")
       .eq("organization_id", id)
       .order("created_at", { ascending: true }),
     auth.admin
@@ -46,7 +46,11 @@ export async function GET(request: NextRequest, context: Context) {
       .order("created_at", { ascending: false }),
   ]);
 
-  const userIds = (membersRes.data || []).map((m) => m.user_id);
+  const activeMembers = (membersRes.data || []).filter(
+    (m: { status?: string | null }) =>
+      m.status !== "suspended" && m.status !== "removed",
+  );
+  const userIds = activeMembers.map((m) => m.user_id);
   const { data: profiles } =
     userIds.length > 0
       ? await auth.admin
@@ -59,15 +63,23 @@ export async function GET(request: NextRequest, context: Context) {
     (profiles || []).map((p) => [String(p.id), p]),
   );
 
-  const billingMembers = (membersRes.data || []).map((m) => {
+  const billingMembers = activeMembers.map((m) => {
     const profile = profileMap.get(String(m.user_id));
+    const hasBillingPerm =
+      m.role === "owner" ||
+      Boolean(m.can_manage_billing) ||
+      Boolean(
+        m.permissions &&
+          typeof m.permissions === "object" &&
+          (m.permissions as Record<string, unknown>)["billing.manage"] === true,
+      );
     return {
       membershipId: m.id,
       userId: m.user_id,
       email: profile?.email || "",
       fullName: profile?.full_name || "",
       role: m.role,
-      canManageBilling: m.role === "owner" || Boolean(m.can_manage_billing),
+      canManageBilling: hasBillingPerm,
       createdAt: m.created_at,
     };
   });

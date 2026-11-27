@@ -19,7 +19,10 @@ export async function GET(request: NextRequest) {
   const auth = await requireAuthenticatedUser(request);
   if ("error" in auth) return auth.error;
 
-  const requestedOrgId = request.nextUrl.searchParams.get("organizationId");
+  const requestedOrgId =
+    request.nextUrl.searchParams.get("organizationId") ||
+    auth.organizationId ||
+    null;
   const orgAccess = await resolveUserOrganizationAccess(
     auth.admin,
     auth.user.id,
@@ -74,7 +77,7 @@ export async function POST(request: NextRequest) {
   const orgAccess = await resolveUserOrganizationAccess(
     auth.admin,
     auth.user.id,
-    parsed.data.organizationId,
+    parsed.data.organizationId || auth.organizationId || null,
     false,
   );
   if ("error" in orgAccess) return orgAccess.error;

@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getOrganizationEffectiveEntitlements } from "@/features/entitlements/engine";
 import {
+  listUserActiveOrganizations,
   requireAuthenticatedUser,
   resolveUserOrganizationAccess,
 } from "@/lib/auth/session";
@@ -56,12 +57,20 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  const orgAccess = await resolveUserOrganizationAccess(
-    auth.admin,
-    auth.user.id,
-    null,
-    false,
-  );
+  const requestedOrgId =
+    request.nextUrl.searchParams.get("organizationId") ||
+    auth.organizationId ||
+    null;
+
+  const [orgAccess, organizations] = await Promise.all([
+    resolveUserOrganizationAccess(
+      auth.admin,
+      auth.user.id,
+      requestedOrgId,
+      false,
+    ),
+    listUserActiveOrganizations(auth.admin, auth.user.id),
+  ]);
 
   let activeSubscription: {
     hasSubscriptionRecord: boolean;
@@ -92,6 +101,7 @@ export async function GET(request: NextRequest) {
         user: auth.user,
         organization: "error" in orgAccess ? null : orgAccess.organization,
         membership: "error" in orgAccess ? null : orgAccess.membership,
+        organizations,
         activeSubscription,
         loginUrl,
         reauthUrl,

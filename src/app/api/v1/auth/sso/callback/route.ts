@@ -49,6 +49,14 @@ export async function GET(request: NextRequest) {
     request.nextUrl.origin ||
     "https://plan.asiyst.com";
   const targetUrl = new URL(consumed.destinationPath, appOrigin);
+  if (
+    consumed.organizationId &&
+    !targetUrl.searchParams.has("organizationId") &&
+    (targetUrl.pathname.startsWith("/account") ||
+      targetUrl.pathname.startsWith("/checkout"))
+  ) {
+    targetUrl.searchParams.set("organizationId", consumed.organizationId);
+  }
 
   const response = wantsJson
     ? NextResponse.json({
@@ -56,6 +64,7 @@ export async function GET(request: NextRequest) {
           authenticated: true,
           purchaseAuthorized: true,
           userId: consumed.userId,
+          organizationId: consumed.organizationId,
           destinationPath: consumed.destinationPath,
           purchaseExpiresAt: consumed.purchaseExpiresAt,
         },

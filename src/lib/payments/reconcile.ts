@@ -5,7 +5,10 @@ import {
   normalizeOfficialPlanSlug,
 } from "@/features/catalog/plans";
 import { enqueueBillingNotification } from "@/lib/email/outbox";
-import { AsiystDodoGateway } from "@/lib/payments/dodo";
+import {
+  AsiystDodoGateway,
+  getPlanForDodoProductId,
+} from "@/lib/payments/dodo";
 import {
   activateVerifiedSubscriptionPayment,
   canTransitionPaymentState,
@@ -330,4 +333,200 @@ export async function reconcileOrderWithProvider(input: {
     retryAllowed: false,
     message: "Checkout session is awaiting completion.",
   };
+}
+
+export interface SubscriptionReconciliationReport {
+  checkedCount: number;
+  updatedCount: number;
+  expiredCount: number;
+  discrepancies: Array<{
+    subscriptionId: string;
+    organizationId: string;
+    issue: string;
+    resolved: boolean;
+  }>;
+}
+
+/**
+ * Reconciles active/pending/past_due/scheduled Supabase subscription records
+ * against authoritative Dodo Payments subscription state and billing period boundaries.
+ */
+export async function reconcileSubscriptionsWithProvider(input: {
+  admin: SupabaseClient;
+  organizationId?: string | null;
+  gateway?: AsiystDodoGateway;
+  nowMs?: number;
+}): Promise<SubscriptionReconciliationReport> {
+  const { admin } = input;
+  const nowMs = input.nowMs ?? Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const gateway = input.gateway ?? new AsiystDodoGateway();
+
+  let query = admin
+    .from("subscriptions")
+    .select("*")
+    .in("status", [
+      "active",
+      "trialing",
+      "past_due",
+      "cancellation_scheduled",
+      "canceled",
+      "cancelled",
+      "pending",
+    ])
+    .order("updated_at", { ascending: false })
+    .limit(100);
+
+  if (input.organizationId) {
+    query = query.eq("organization_id", input.organizationId);
+  }
+
+  const { data: rows } = await query;
+  const subs = (rows || []) as Array<Record<string, unknown>>;
+
+  const report: SubscriptionReconciliationReport = {
+    checkedCount: subs.length,
+    updatedCount: 0,
+    expiredCount: 0,
+    discrepancies: [],
+  };
+
+  for (const sub of subs) {
+    const subId = String(sub.id);
+    const orgId = String(sub.organization_id);
+    const planSlug = normalizeOfficialPlanSlug(String(sub.plan || "zero")) || "zero";
+    if (planSlug === "zero") continue;
+
+    const periodEndMs = sub.current_period_end
+      ? Date.parse(String(sub.current_period_end))
+      : NaN;
+
+    // 1. Handle local period expiration for canceled subscriptions
+    if (
+      (sub.status === "canceled" ||
+        sub.status === "cancelled" ||
+        (sub.cancel_at_period_end && sub.scheduled_plan === "zero")) &&
+      Number.isFinite(periodEndMs) &&
+      periodEndMs <= nowMs
+    ) {
+      await admin
+        .from("subscriptions")
+        .update({
+          status: "expired",
+          scheduled_plan: null,
+          scheduled_change_effective_at: null,
+          updated_at: nowIso,
+        })
+        .eq("id", subId);
+
+      // Ensure Zero fallback row is active
+      await admin.rpc("activate_organization_free_plan", {
+        p_organization_id: orgId,
+        p_user_id: sub.user_id,
+      });
+
+      report.updatedCount += 1;
+      report.expiredCount += 1;
+      continue;
+    }
+
+    // 2. Query upstream Dodo subscription state when dodo_subscription_id is present
+    const dodoSubId = sub.dodo_subscription_id ? String(sub.dodo_subscription_id) : "";
+    if (!dodoSubId) continue;
+
+    const remote = await gateway.retrieveSubscriptionDetails(dodoSubId);
+    if (!remote.ok) {
+      report.discrepancies.push({
+        subscriptionId: subId,
+        organizationId: orgId,
+        issue: `Unable to query Dodo subscription ${dodoSubId}: ${remote.error}`,
+        resolved: false,
+      });
+      continue;
+    }
+
+    const remotePlan = getPlanForDodoProductId(remote.productId);
+    const scheduledPlan = remote.scheduledProductId
+      ? getPlanForDodoProductId(remote.scheduledProductId)
+      : null;
+
+    if (remote.status === "active" && remotePlan && remotePlan !== planSlug) {
+      const activation = await activateVerifiedSubscriptionPayment({
+        admin,
+        organizationId: orgId,
+        subscriptionId: subId,
+        userId: sub.user_id ? String(sub.user_id) : null,
+        planSlug: remotePlan,
+        productId: remote.productId,
+        providerSubscriptionId: dodoSubId,
+        amountMinor: remote.recurringAmountMinor || OFFICIAL_PLANS[remotePlan].priceMinor,
+        currency: remote.currency,
+        currentPeriodStart: remote.currentPeriodStart,
+        currentPeriodEnd: remote.currentPeriodEnd,
+        cancelAtPeriodEnd: remote.cancelAtNextBillingDate,
+        isPlanChange: true,
+        eventSource: "provider_reconciliation",
+      });
+
+      report.discrepancies.push({
+        subscriptionId: subId,
+        organizationId: orgId,
+        issue: `Plan drift detected (local: ${planSlug}, Dodo: ${remotePlan})`,
+        resolved: activation.ok,
+      });
+      if (activation.ok) report.updatedCount += 1;
+    } else if (
+      remote.cancelAtNextBillingDate !== Boolean(sub.cancel_at_period_end) ||
+      (scheduledPlan && scheduledPlan !== sub.scheduled_plan)
+    ) {
+      await admin
+        .from("subscriptions")
+        .update({
+          cancel_at_period_end: remote.cancelAtNextBillingDate,
+          scheduled_plan: scheduledPlan || (remote.cancelAtNextBillingDate ? "zero" : null),
+          scheduled_change_effective_at:
+            remote.scheduledEffectiveAt || remote.currentPeriodEnd || sub.current_period_end,
+          current_period_start: remote.currentPeriodStart || sub.current_period_start,
+          current_period_end: remote.currentPeriodEnd || sub.current_period_end,
+          updated_at: nowIso,
+        })
+        .eq("id", subId);
+
+      report.updatedCount += 1;
+      report.discrepancies.push({
+        subscriptionId: subId,
+        organizationId: orgId,
+        issue: "Synchronized scheduled cancellation/downgrade metadata from Dodo",
+        resolved: true,
+      });
+    } else if (
+      (remote.status === "cancelled" || remote.status === "expired") &&
+      !["canceled", "cancelled", "expired"].includes(String(sub.status))
+    ) {
+      const nextStatus =
+        remote.currentPeriodEnd && Date.parse(remote.currentPeriodEnd) > nowMs
+          ? "canceled"
+          : "expired";
+      await admin
+        .from("subscriptions")
+        .update({
+          status: nextStatus,
+          cancelled_at: nowIso,
+          current_period_end: remote.currentPeriodEnd || sub.current_period_end,
+          updated_at: nowIso,
+        })
+        .eq("id", subId);
+
+      report.updatedCount += 1;
+      if (nextStatus === "expired") report.expiredCount += 1;
+      report.discrepancies.push({
+        subscriptionId: subId,
+        organizationId: orgId,
+        issue: `Synchronized terminal status '${nextStatus}' from Dodo`,
+        resolved: true,
+      });
+    }
+  }
+
+  return report;
 }

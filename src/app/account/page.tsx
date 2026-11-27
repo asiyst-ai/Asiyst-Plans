@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { OFFICIAL_PLANS, formatMinorCurrency } from "@/features/catalog/plans";
 import type { OfficialPlanSlug } from "@/types/billing";
+import { PLANS_ORG_CHANGE_EVENT, PLANS_ORG_STORAGE_KEY } from "./layout";
 
 interface BillingSummaryPayload {
   organization: { id: string; name: string; owner_id: string };
@@ -52,9 +53,15 @@ export default function AccountDashboardPage() {
 
   React.useEffect(() => {
     let mounted = true;
-    async function load() {
+    async function load(explicitOrgId?: string | null) {
+      const orgId =
+        explicitOrgId ??
+        (typeof window !== "undefined"
+          ? window.localStorage.getItem(PLANS_ORG_STORAGE_KEY)
+          : null);
+      const qs = orgId ? `?organizationId=${encodeURIComponent(orgId)}` : "";
       try {
-        const res = await fetch("/api/v1/billing/summary");
+        const res = await fetch(`/api/v1/billing/summary${qs}`, { cache: "no-store" });
         const body = await res.json();
         if (!mounted) return;
         if (res.ok && body.data) {
@@ -64,9 +71,12 @@ export default function AccountDashboardPage() {
         if (mounted) setLoading(false);
       }
     }
-    load();
+    void load();
+    const onOrgChange = (e: Event) => void load((e as CustomEvent<string>).detail);
+    window.addEventListener(PLANS_ORG_CHANGE_EVENT, onOrgChange);
     return () => {
       mounted = false;
+      window.removeEventListener(PLANS_ORG_CHANGE_EVENT, onOrgChange);
     };
   }, []);
 
@@ -191,32 +201,24 @@ export default function AccountDashboardPage() {
                 label: "Active Projects",
                 used: data?.usage?.projects.used ?? 1,
                 limit:
-                  data?.usage?.projects.limit ??
-                  (typeof planDef.limits.projects === "number"
-                    ? planDef.limits.projects
-                    : 1),
-                unlimited: false,
+                  data?.usage?.projects.limit ?? planDef.limits.projects,
+                unlimited:
+                  data?.usage?.projects.unlimited ??
+                  planDef.limits.projects === null,
               },
               {
                 label: "Organization Seats (Owners, Admins & Members)",
                 used: data?.usage?.organizationSeats.used ?? 1,
                 limit:
                   data?.usage?.organizationSeats.limit ??
-                  (typeof planDef.limits.organizationSeats === "number"
-                    ? planDef.limits.organizationSeats
-                    : 1),
-                unlimited: false,
+                  planDef.limits.organizationSeats,
+                unlimited: planDef.limits.organizationSeats === null,
               },
               {
                 label: "Knowledge Files",
                 used: data?.usage?.knowledgeFiles.used ?? 0,
-                limit:
-                  planDef.limits.knowledgeFiles === "unlimited"
-                    ? null
-                    : planDef.limits.knowledgeFiles === "basic"
-                      ? 0
-                      : planDef.limits.knowledgeFiles,
-                unlimited: planDef.limits.knowledgeFiles === "unlimited",
+                limit: planDef.limits.knowledgeFiles,
+                unlimited: planDef.limits.knowledgeFiles === null,
               },
             ].map((item) => {
               const pct =

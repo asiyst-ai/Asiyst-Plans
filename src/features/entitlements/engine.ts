@@ -1,10 +1,14 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   OFFICIAL_PLANS,
+  getMinimumPlanForCapability,
   normalizeOfficialPlanSlug,
 } from "@/features/catalog/plans";
 import type {
+  CanonicalFeatureKey,
+  CanonicalQuotaKey,
   EffectiveOrganizationEntitlements,
+  EntitlementAccessError,
   OfficialPlanSlug,
   SubscriptionLifecycleStatus,
 } from "@/types/billing";
@@ -21,23 +25,13 @@ export interface RawSubscriptionRow {
   current_period_start: string | null;
   current_period_end: string | null;
   cancel_at_period_end: boolean;
+  scheduled_plan?: string | null;
+  scheduled_change_effective_at?: string | null;
   billing_recovery_deadline?: string | null;
   entitlement_overrides: Record<string, unknown> | null;
   updated_at?: string;
 }
 
-/**
- * Determines whether a subscription row is currently granting active entitlements.
- *
- * CRITICAL COMMERCIAL & SECURITY RULE:
- * - A paid subscription (`pulse`, `vector`, `quantum`) ONLY activates benefits
- *   after the payment and subscription state have been verified by the backend!
- * - `pending`, `payment_failed`, `incomplete`, `expired`, and `paused` NEVER
- *   grant paid plan benefits.
- * - `active`, `trialing`, `past_due` (within recovery grace period), or
- *   `cancellation_scheduled` / `canceled` (while `current_period_end > now`)
- *   grant the paid plan's entitlements.
- */
 export function isSubscriptionGrantingEntitlements(
   sub: Pick<
     RawSubscriptionRow,
@@ -50,12 +44,10 @@ export function isSubscriptionGrantingEntitlements(
 
   const status = (sub.status || "").trim().toLowerCase();
 
-  // Zero (free) plan is active when status is 'active' or 'free'
   if (normalizedPlan === "zero") {
     return status === "active" || status === "free";
   }
 
-  // Paid plan states that NEVER grant paid benefits:
   if (
     status === "pending" ||
     status === "incomplete" ||
@@ -99,14 +91,6 @@ export function isSubscriptionGrantingEntitlements(
   return false;
 }
 
-/**
- * Pure deterministic entitlement calculator for an organization.
- *
- * - Strictly excludes AI Credits (`aiCreditsIncluded: 0`).
- * - Falls back to Asiyst Zero (`zero`) if the organization has no verified
- *   paid subscription or if a checkout is still `pending`.
- * - Supports explicit administrative overrides stored in `entitlement_overrides`.
- */
 export function computeEffectiveEntitlementsFromSubscription(
   organizationId: string,
   sub: RawSubscriptionRow | null,
@@ -114,10 +98,24 @@ export function computeEffectiveEntitlementsFromSubscription(
 ): EffectiveOrganizationEntitlements {
   const isGranting = sub ? isSubscriptionGrantingEntitlements(sub, nowMs) : false;
   const rawPlanSlug = sub ? normalizeOfficialPlanSlug(sub.plan) : "zero";
+  const rawStatus = (sub?.status || "free").trim().toLowerCase();
 
-  // If subscription is pending payment or expired, fall back to 'zero' entitlements!
-  const effectivePlanSlug: OfficialPlanSlug =
-    isGranting && rawPlanSlug ? rawPlanSlug : "zero";
+  const scheduledPlanSlug = sub?.scheduled_plan
+    ? normalizeOfficialPlanSlug(sub.scheduled_plan)
+    : null;
+  const scheduledEffectiveMs = sub?.scheduled_change_effective_at
+    ? new Date(sub.scheduled_change_effective_at).getTime()
+    : NaN;
+  const isScheduledPlanNowEffective =
+    Boolean(scheduledPlanSlug) &&
+    Number.isFinite(scheduledEffectiveMs) &&
+    scheduledEffectiveMs <= nowMs;
+
+  const effectivePlanSlug: OfficialPlanSlug = isGranting
+    ? isScheduledPlanNowEffective && scheduledPlanSlug
+      ? scheduledPlanSlug
+      : rawPlanSlug || "zero"
+    : "zero";
 
   const planDef = OFFICIAL_PLANS[effectivePlanSlug];
   const isPaidActive =
@@ -126,11 +124,31 @@ export function computeEffectiveEntitlementsFromSubscription(
       effectivePlanSlug === "vector" ||
       effectivePlanSlug === "quantum");
 
-  const rawStatus = (sub?.status || "free").toLowerCase();
+  const isExpired =
+    Boolean(sub) &&
+    rawPlanSlug !== "zero" &&
+    (rawStatus === "expired" ||
+      ((rawStatus === "canceled" ||
+        rawStatus === "cancelled" ||
+        rawStatus === "active" ||
+        rawStatus === "cancellation_scheduled") &&
+        Boolean(sub?.current_period_end) &&
+        new Date(sub!.current_period_end!).getTime() <= nowMs));
+
+  const hasBillingFailure =
+    Boolean(sub) &&
+    rawPlanSlug !== "zero" &&
+    (rawStatus === "payment_failed" ||
+      (rawStatus === "past_due" &&
+        Boolean(sub?.billing_recovery_deadline) &&
+        new Date(sub!.billing_recovery_deadline!).getTime() <= nowMs));
+
   const lifecycleStatus: SubscriptionLifecycleStatus =
     sub && rawStatus === "active" && sub.cancel_at_period_end
       ? "cancellation_scheduled"
-      : (rawStatus as SubscriptionLifecycleStatus) || "free";
+      : isExpired && rawStatus === "active"
+        ? "expired"
+        : (rawStatus as SubscriptionLifecycleStatus) || "free";
 
   const overrides =
     isGranting &&
@@ -140,16 +158,19 @@ export function computeEffectiveEntitlementsFromSubscription(
       ? sub.entitlement_overrides
       : {};
 
-  const readNumberOverride = (key: string): number | null | undefined => {
-    const val = overrides[key];
-    if (val === "unlimited") return null;
+  const resolveQuota = (
+    overrideKey: string,
+    defaultLimit: number | null,
+  ): { limit: number | null; unlimited: boolean } => {
+    const val = overrides[overrideKey];
+    if (val === "unlimited") return { limit: null, unlimited: true };
     if (typeof val === "number" && Number.isSafeInteger(val) && val >= 0) {
-      return val;
+      return { limit: val, unlimited: false };
     }
     if (typeof val === "string" && /^[0-9]+$/.test(val)) {
-      return parseInt(val, 10);
+      return { limit: parseInt(val, 10), unlimited: false };
     }
-    return undefined;
+    return { limit: defaultLimit, unlimited: defaultLimit === null };
   };
 
   const readBoolOverride = (key: string, fallback: boolean): boolean => {
@@ -159,60 +180,31 @@ export function computeEffectiveEntitlementsFromSubscription(
     return fallback;
   };
 
-  const defaultProjectsLimit =
-    typeof planDef.limits.projects === "number" ? planDef.limits.projects : 1;
-  const projectsLimit =
-    readNumberOverride("projects.max_count") !== undefined
-      ? readNumberOverride("projects.max_count")!
-      : defaultProjectsLimit;
+  const workspacesQ = resolveQuota("workspaces.max_count", planDef.limits.workspaces);
+  const projectsQ = resolveQuota("projects.max_count", planDef.limits.projects);
+  const seatsQ = resolveQuota("organization.max_members", planDef.limits.organizationSeats);
+  const assistantsQ = resolveQuota("assistants.max_count", planDef.limits.assistants);
+  const knowledgeFilesQ = resolveQuota("knowledge.max_files", planDef.limits.knowledgeFiles);
+  const knowledgeEntriesQ = resolveQuota("knowledge.max_entries", planDef.limits.knowledgeEntries);
+  const knowledgeUnitsQ = resolveQuota("knowledge.max_units", planDef.limits.knowledgeUnits);
+  const knowledgeStorageQ = resolveQuota(
+    "knowledge.max_storage_bytes",
+    planDef.limits.knowledgeStorageBytes,
+  );
+  const crawlPagesQ = resolveQuota("crawl.max_pages", planDef.limits.crawlPages);
+  const scheduledJobsQ = resolveQuota(
+    "knowledge.max_scheduled_jobs",
+    planDef.limits.scheduledSyncJobs,
+  );
 
-  const defaultSeatsLimit =
-    typeof planDef.limits.organizationSeats === "number"
-      ? planDef.limits.organizationSeats
-      : 1;
-  const seatsLimit =
-    readNumberOverride("organization.max_members") !== undefined
-      ? readNumberOverride("organization.max_members")!
-      : defaultSeatsLimit;
+  const capabilities = {} as Record<CanonicalFeatureKey, boolean>;
+  for (const [k, v] of Object.entries(planDef.capabilities)) {
+    capabilities[k as CanonicalFeatureKey] = readBoolOverride(k, v);
+  }
 
-  const defaultAssistantsLimit =
-    typeof planDef.limits.assistants === "number" ? planDef.limits.assistants : 1;
-  const assistantsLimit =
-    readNumberOverride("assistants.max_count") !== undefined
-      ? readNumberOverride("assistants.max_count")!
-      : defaultAssistantsLimit;
-
-  // Knowledge files: Zero = 0 custom file uploads (basic manual/sitemap context), Pulse = 5, Vector = 50, Quantum = unlimited (null)
-  const defaultKnowledgeFilesLimit =
-    planDef.limits.knowledgeFiles === "unlimited"
-      ? null
-      : planDef.limits.knowledgeFiles === "basic"
-        ? 0
-        : planDef.limits.knowledgeFiles;
-  const knowledgeFilesLimit =
-    readNumberOverride("knowledge.max_files") !== undefined
-      ? readNumberOverride("knowledge.max_files")!
-      : defaultKnowledgeFilesLimit;
-
-  const isKnowledgeFilesUnlimited = knowledgeFilesLimit === null;
-
-  const knowledgeEntriesLimit =
-    readNumberOverride("knowledge.max_entries") !== undefined
-      ? readNumberOverride("knowledge.max_entries")!
-      : planDef.limits.knowledgeEntries;
-
-  const knowledgeStorageLimit =
-    readNumberOverride("knowledge.max_storage_bytes") !== undefined
-      ? readNumberOverride("knowledge.max_storage_bytes")!
-      : planDef.limits.knowledgeStorageBytes;
-
-  const isPulseOrAbove =
-    effectivePlanSlug === "pulse" ||
-    effectivePlanSlug === "vector" ||
-    effectivePlanSlug === "quantum";
-  const isVectorOrAbove =
-    effectivePlanSlug === "vector" || effectivePlanSlug === "quantum";
-  const isQuantum = effectivePlanSlug === "quantum";
+  const resetPeriod: "monthly" | "billing_period" = isPaidActive
+    ? "billing_period"
+    : "monthly";
 
   return {
     organizationId,
@@ -223,43 +215,60 @@ export function computeEffectiveEntitlementsFromSubscription(
     status: lifecycleStatus,
     isPaidActive,
     isInGracePeriod: isGranting && rawStatus === "past_due",
+    isExpired,
+    hasBillingFailure,
     cancelAtPeriodEnd: Boolean(sub?.cancel_at_period_end),
+    scheduledPlan: !isScheduledPlanNowEffective ? scheduledPlanSlug : null,
+    scheduledChangeEffectiveAt: !isScheduledPlanNowEffective
+      ? sub?.scheduled_change_effective_at || null
+      : null,
     currentPeriodStart: sub?.current_period_start || null,
     currentPeriodEnd: sub?.current_period_end || null,
-    aiCreditsIncluded: 0, // Strictly 0 across all plans
+    resetPeriod,
+    aiCreditsIncluded: 0,
+    capabilities,
+    quotas: {
+      projects: { ...projectsQ, resetPeriod: "none" },
+      workspaces: { ...workspacesQ, resetPeriod: "none" },
+      organization_seats: { ...seatsQ, resetPeriod: "none" },
+      assistants: { ...assistantsQ, resetPeriod: "none" },
+      knowledge_files: { ...knowledgeFilesQ, resetPeriod: "none" },
+      knowledge_entries: { ...knowledgeEntriesQ, resetPeriod: "none" },
+      knowledge_units: { ...knowledgeUnitsQ, resetPeriod: "none" },
+      knowledge_storage_bytes: { ...knowledgeStorageQ, resetPeriod: "none" },
+      crawl_pages: {
+        ...crawlPagesQ,
+        fairUseCap: planDef.limits.crawlFairUseCap,
+        resetPeriod,
+      },
+      scheduled_sync_jobs: { ...scheduledJobsQ, resetPeriod: "none" },
+      analytics_history_days: {
+        limit: planDef.limits.analyticsHistoryDays ?? 7,
+        unlimited: false,
+        resetPeriod: "none",
+      },
+    },
     features: {
-      projects: {
-        enabled: true,
-        limit: projectsLimit,
-        unlimited: projectsLimit === null,
-      },
-      organization_seats: {
-        enabled: true,
-        limit: seatsLimit,
-        unlimited: seatsLimit === null,
-      },
-      assistants: {
-        enabled: true,
-        limit: assistantsLimit,
-        unlimited: assistantsLimit === null,
-      },
+      workspaces: { enabled: true, ...workspacesQ },
+      projects: { enabled: true, ...projectsQ },
+      organization_seats: { enabled: true, ...seatsQ },
+      assistants: { enabled: true, ...assistantsQ },
       knowledge_files: {
-        enabled: readBoolOverride(
-          "knowledge.files_enabled",
-          isPulseOrAbove || (knowledgeFilesLimit !== null && knowledgeFilesLimit > 0),
-        ),
-        limit: knowledgeFilesLimit,
-        unlimited: isKnowledgeFilesUnlimited,
+        enabled: knowledgeFilesQ.unlimited || (knowledgeFilesQ.limit ?? 0) > 0,
+        ...knowledgeFilesQ,
       },
-      knowledge_entries: {
-        enabled: true,
-        limit: knowledgeEntriesLimit,
-        unlimited: knowledgeEntriesLimit === null,
+      knowledge_entries: { enabled: true, ...knowledgeEntriesQ },
+      knowledge_units: { enabled: true, ...knowledgeUnitsQ },
+      knowledge_storage_bytes: { enabled: true, ...knowledgeStorageQ },
+      crawl_pages: {
+        enabled: crawlPagesQ.unlimited || (crawlPagesQ.limit ?? 0) > 0,
+        ...crawlPagesQ,
+        fairUseCap: planDef.limits.crawlFairUseCap,
+        resetPeriod,
       },
-      knowledge_storage_bytes: {
-        enabled: true,
-        limit: knowledgeStorageLimit,
-        unlimited: knowledgeStorageLimit === null,
+      scheduled_sync_jobs: {
+        enabled: capabilities["knowledge.scheduled_sync"],
+        ...scheduledJobsQ,
       },
       website_crawling: {
         enabled: true,
@@ -270,10 +279,7 @@ export function computeEffectiveEntitlementsFromSubscription(
         tier: planDef.capabilityMatrix.websiteIndexing,
       },
       scheduled_crawling: {
-        enabled: readBoolOverride(
-          "website.scheduled_recrawling",
-          planDef.capabilityMatrix.scheduledRecrawling,
-        ),
+        enabled: capabilities["knowledge.scheduled_sync"],
       },
       index_monitoring: {
         enabled: readBoolOverride(
@@ -286,63 +292,102 @@ export function computeEffectiveEntitlementsFromSubscription(
         tier: planDef.capabilityMatrix.customWelcome,
       },
       custom_appearance: {
-        enabled: readBoolOverride("assistant.custom_appearance", isPulseOrAbove),
+        enabled: capabilities["avatar.customization"],
         tier: planDef.capabilityMatrix.customAppearance,
       },
       activity_logs: {
-        enabled: readBoolOverride("monitoring.activity_logs", isPulseOrAbove),
+        enabled: readBoolOverride(
+          "monitoring.activity_logs",
+          effectivePlanSlug !== "zero",
+        ),
         tier: planDef.capabilityMatrix.activityLogs,
       },
       basic_analytics: {
-        enabled: true,
+        enabled: capabilities["analytics.basic"],
       },
       advanced_analytics: {
-        enabled: readBoolOverride("analytics.advanced", isVectorOrAbove),
+        enabled: capabilities["analytics.advanced"],
+      },
+      conversion_analytics: {
+        enabled: capabilities["analytics.conversion"],
+      },
+      analytics_export: {
+        enabled: capabilities["analytics.export"],
+      },
+      multi_project_analytics: {
+        enabled: capabilities["analytics.multi_project"],
+      },
+      cohort_analytics: {
+        enabled: capabilities["analytics.cohort"],
+      },
+      ai_analytics_summary: {
+        enabled: capabilities["analytics.ai_summary"],
+      },
+      anomaly_detection: {
+        enabled: capabilities["analytics.anomaly_detection"],
       },
       advanced_reporting: {
-        enabled: readBoolOverride("analytics.advanced_reporting", isQuantum),
+        enabled: readBoolOverride(
+          "analytics.advanced_reporting",
+          planDef.capabilityMatrix.advancedReporting,
+        ),
       },
       built_in_avatars: {
         enabled: true,
       },
+      avatar_chat: {
+        enabled: capabilities["avatar.chat"],
+      },
       custom_avatar_upload: {
-        enabled: readBoolOverride(
-          "avatar.custom_upload",
-          planDef.capabilityMatrix.customAvatarUpload,
-        ),
+        enabled: capabilities["avatar.custom_upload"],
       },
       advanced_avatar_capabilities: {
-        enabled: readBoolOverride("avatar.advanced", isVectorOrAbove),
+        enabled: capabilities["avatar.advanced"],
       },
       avatar_studio: {
-        enabled: readBoolOverride(
-          "avatar.studio",
-          planDef.capabilityMatrix.avatarStudio,
-        ),
+        enabled: capabilities["avatar.studio"],
       },
       advanced_animations: {
-        enabled: readBoolOverride("avatar.advanced_animations", isVectorOrAbove),
+        enabled: capabilities["avatar.advanced"],
+      },
+      enhanced_visitor_interactions: {
+        enabled: capabilities["visitor.enhanced_interactions"],
       },
       team_collaboration: {
-        enabled: readBoolOverride("collaboration.team", isVectorOrAbove),
+        enabled: readBoolOverride(
+          "collaboration.team",
+          effectivePlanSlug === "vector" || effectivePlanSlug === "quantum",
+        ),
       },
       multiple_integrations: {
-        enabled: readBoolOverride("integrations.multiple", isVectorOrAbove),
+        enabled: readBoolOverride(
+          "integrations.multiple",
+          effectivePlanSlug === "vector" || effectivePlanSlug === "quantum",
+        ),
       },
       audit_history: {
-        enabled: readBoolOverride("admin.audit_history", isQuantum),
+        enabled: readBoolOverride("admin.audit_history", effectivePlanSlug === "quantum"),
+      },
+      knowledge_versioning: {
+        enabled: capabilities["knowledge.versioning"],
       },
       advanced_permissions: {
-        enabled: readBoolOverride("admin.advanced_permissions", isQuantum),
+        enabled: capabilities["advanced_permissions"],
       },
       organization_management: {
-        enabled: readBoolOverride("admin.organization_management", isQuantum),
+        enabled: readBoolOverride(
+          "admin.organization_management",
+          effectivePlanSlug === "vector" || effectivePlanSlug === "quantum",
+        ),
+      },
+      advanced_project_management: {
+        enabled: capabilities["projects.advanced_management"],
       },
       remove_asiyst_branding: {
-        enabled: readBoolOverride(
-          "branding.whitelabel",
-          !planDef.capabilityMatrix.asiystBrandingVisible,
-        ),
+        enabled: capabilities["branding.whitelabel"],
+      },
+      full_whitelabel: {
+        enabled: capabilities["branding.full_whitelabel"],
       },
       support_tier: {
         enabled: true,
@@ -352,37 +397,39 @@ export function computeEffectiveEntitlementsFromSubscription(
   };
 }
 
-/**
- * Selects the authoritative subscription for an organization from a list of rows.
- * Prioritizes verified active paid subscriptions over free rows or pending checkouts.
- */
 export function selectAuthoritativeSubscription(
   rows: RawSubscriptionRow[],
   nowMs: number = Date.now(),
 ): RawSubscriptionRow | null {
   if (!rows || rows.length === 0) return null;
 
-  // 1. Active / granting paid subscription
   const activePaid = rows.find((r) => {
     const slug = normalizeOfficialPlanSlug(r.plan);
     return slug && slug !== "zero" && isSubscriptionGrantingEntitlements(r, nowMs);
   });
   if (activePaid) return activePaid;
 
-  // 2. Active free (Zero) subscription
+  // Prefer recent expired/failed paid row over silent free row so expired/billing-failure reason is preserved
+  const nonZeroProblem = rows.find((r) => {
+    const slug = normalizeOfficialPlanSlug(r.plan);
+    const status = (r.status || "").toLowerCase();
+    return (
+      slug &&
+      slug !== "zero" &&
+      ["expired", "payment_failed", "past_due", "canceled", "cancelled"].includes(status)
+    );
+  });
+  if (nonZeroProblem) return nonZeroProblem;
+
   const activeZero = rows.find((r) => {
     const slug = normalizeOfficialPlanSlug(r.plan);
     return slug === "zero" && isSubscriptionGrantingEntitlements(r, nowMs);
   });
   if (activeZero) return activeZero;
 
-  // 3. Most recently updated row (e.g. pending or expired) for status visibility
   return rows[0];
 }
 
-/**
- * Fetches the authoritative organization subscription and computes effective entitlements.
- */
 export async function getOrganizationEffectiveEntitlements(
   admin: SupabaseClient,
   organizationId: string,
@@ -393,7 +440,7 @@ export async function getOrganizationEffectiveEntitlements(
   const { data, error } = await admin
     .from("subscriptions")
     .select(
-      "id, organization_id, plan, status, billing_provider, dodo_subscription_id, dodo_product_id, price_minor, current_period_start, current_period_end, cancel_at_period_end, billing_recovery_deadline, entitlement_overrides, updated_at",
+      "id, organization_id, plan, status, billing_provider, dodo_subscription_id, dodo_product_id, price_minor, current_period_start, current_period_end, cancel_at_period_end, scheduled_plan, scheduled_change_effective_at, billing_recovery_deadline, entitlement_overrides, updated_at",
     )
     .eq("organization_id", organizationId)
     .order("updated_at", { ascending: false });
@@ -415,15 +462,159 @@ export async function getOrganizationEffectiveEntitlements(
   };
 }
 
+export const getEffectiveEntitlements = getOrganizationEffectiveEntitlements;
+
+export function checkFeatureAccess(
+  entitlements: EffectiveOrganizationEntitlements,
+  feature: CanonicalFeatureKey,
+): { allowed: true } | { allowed: false; decision: EntitlementAccessError } {
+  if (entitlements.capabilities[feature]) {
+    return { allowed: true };
+  }
+
+  const requiredPlan = getMinimumPlanForCapability(feature);
+  const planAppUrl = process.env.NEXT_PUBLIC_APP_URL || "https://plan.asiyst.com";
+
+  if (entitlements.hasBillingFailure) {
+    return {
+      allowed: false,
+      decision: {
+        code: "BILLING_FAILURE",
+        httpStatus: 402,
+        feature,
+        currentPlan: entitlements.plan,
+        requiredPlan,
+        subscriptionStatus: entitlements.status,
+        limit: null,
+        currentUsage: 0,
+        upgradeUrl: `${planAppUrl}/account/billing`,
+        message: `Payment failed for your subscription. Update your payment method to restore '${feature}'.`,
+      },
+    };
+  }
+
+  if (entitlements.isExpired) {
+    return {
+      allowed: false,
+      decision: {
+        code: "SUBSCRIPTION_EXPIRED",
+        httpStatus: 403,
+        feature,
+        currentPlan: entitlements.plan,
+        requiredPlan,
+        subscriptionStatus: entitlements.status,
+        limit: null,
+        currentUsage: 0,
+        upgradeUrl: `${planAppUrl}/checkout?plan=${requiredPlan}`,
+        message: `Your paid subscription has expired. Renew or upgrade to ${OFFICIAL_PLANS[requiredPlan].name} to access '${feature}'.`,
+      },
+    };
+  }
+
+  return {
+    allowed: false,
+    decision: {
+      code: "FEATURE_NOT_AVAILABLE",
+      httpStatus: 403,
+      feature,
+      currentPlan: entitlements.plan,
+      requiredPlan,
+      subscriptionStatus: entitlements.status,
+      limit: null,
+      currentUsage: 0,
+      upgradeUrl: `${planAppUrl}/checkout?plan=${requiredPlan}`,
+      message: `Feature '${feature}' requires ${OFFICIAL_PLANS[requiredPlan].name} or higher (current plan: ${OFFICIAL_PLANS[entitlements.plan].name}).`,
+    },
+  };
+}
+
+export function checkQuotaAccess(
+  entitlements: EffectiveOrganizationEntitlements,
+  quotaKey: CanonicalQuotaKey,
+  currentUsage: number,
+  requestedAmount: number = 1,
+):
+  | { allowed: true; limit: number | null; unlimited: boolean; remaining: number | null }
+  | { allowed: false; decision: EntitlementAccessError } {
+  const quota = entitlements.quotas[quotaKey];
+  const planAppUrl = process.env.NEXT_PUBLIC_APP_URL || "https://plan.asiyst.com";
+
+  const nextPlanMap: Record<OfficialPlanSlug, OfficialPlanSlug> = {
+    zero: "pulse",
+    pulse: "vector",
+    vector: "quantum",
+    quantum: "quantum",
+  };
+  const requiredPlan = nextPlanMap[entitlements.plan];
+
+  if (!quota.unlimited && quota.limit === 0) {
+    return {
+      allowed: false,
+      decision: {
+        code: "ZERO_QUOTA",
+        httpStatus: 403,
+        feature: quotaKey,
+        currentPlan: entitlements.plan,
+        requiredPlan,
+        subscriptionStatus: entitlements.status,
+        limit: 0,
+        currentUsage,
+        upgradeUrl: `${planAppUrl}/checkout?plan=${requiredPlan}`,
+        message: `Your ${OFFICIAL_PLANS[entitlements.plan].name} plan has a 0 allowance for '${quotaKey}'. Upgrade to ${OFFICIAL_PLANS[requiredPlan].name}.`,
+      },
+    };
+  }
+
+  if (!quota.unlimited && typeof quota.limit === "number") {
+    if (currentUsage + requestedAmount > quota.limit) {
+      const code = entitlements.hasBillingFailure
+        ? "BILLING_FAILURE"
+        : entitlements.isExpired
+          ? "SUBSCRIPTION_EXPIRED"
+          : "QUOTA_EXHAUSTED";
+      return {
+        allowed: false,
+        decision: {
+          code,
+          httpStatus: code === "BILLING_FAILURE" ? 402 : 429,
+          feature: quotaKey,
+          currentPlan: entitlements.plan,
+          requiredPlan,
+          subscriptionStatus: entitlements.status,
+          limit: quota.limit,
+          currentUsage,
+          upgradeUrl: `${planAppUrl}/checkout?plan=${requiredPlan}`,
+          message: `Quota exhausted for '${quotaKey}' (${currentUsage}/${quota.limit}) on ${OFFICIAL_PLANS[entitlements.plan].name}. Upgrade to ${OFFICIAL_PLANS[requiredPlan].name} for higher capacity.`,
+        },
+      };
+    }
+    return {
+      allowed: true,
+      limit: quota.limit,
+      unlimited: false,
+      remaining: Math.max(0, quota.limit - (currentUsage + requestedAmount)),
+    };
+  }
+
+  return {
+    allowed: true,
+    limit: null,
+    unlimited: true,
+    remaining: null,
+  };
+}
+
 export interface EntitlementCheckRequest {
-  featureKey: keyof EffectiveOrganizationEntitlements["features"];
+  featureKey: string;
   requestedAmount?: number;
   currentUsage?: number;
 }
 
 export interface EntitlementCheckResponse {
   allowed: boolean;
+  code?: EntitlementAccessError["code"];
   plan: OfficialPlanSlug;
+  requiredPlan?: OfficialPlanSlug;
   isPaidActive: boolean;
   featureKey: string;
   enabled: boolean;
@@ -431,28 +622,101 @@ export interface EntitlementCheckResponse {
   unlimited: boolean;
   currentUsage: number;
   requestedAmount: number;
+  upgradeUrl?: string;
   reason?: string;
 }
 
-/**
- * Evaluates a specific feature or numeric quota against effective entitlements.
- */
 export function evaluateEntitlementCheck(
   entitlements: EffectiveOrganizationEntitlements,
   check: EntitlementCheckRequest,
 ): EntitlementCheckResponse {
-  const entry = entitlements.features[check.featureKey] as {
+  const requestedAmount = check.requestedAmount ?? 1;
+  const currentUsage = check.currentUsage ?? 0;
+
+  if (check.featureKey in entitlements.capabilities) {
+    const res = checkFeatureAccess(
+      entitlements,
+      check.featureKey as CanonicalFeatureKey,
+    );
+    if (!res.allowed) {
+      return {
+        allowed: false,
+        code: res.decision.code,
+        plan: entitlements.plan,
+        requiredPlan: res.decision.requiredPlan,
+        isPaidActive: entitlements.isPaidActive,
+        featureKey: check.featureKey,
+        enabled: false,
+        limit: null,
+        unlimited: false,
+        currentUsage,
+        requestedAmount,
+        upgradeUrl: res.decision.upgradeUrl,
+        reason: res.decision.message,
+      };
+    }
+    return {
+      allowed: true,
+      plan: entitlements.plan,
+      isPaidActive: entitlements.isPaidActive,
+      featureKey: check.featureKey,
+      enabled: true,
+      limit: null,
+      unlimited: true,
+      currentUsage,
+      requestedAmount,
+    };
+  }
+
+  if (check.featureKey in entitlements.quotas) {
+    const res = checkQuotaAccess(
+      entitlements,
+      check.featureKey as CanonicalQuotaKey,
+      currentUsage,
+      requestedAmount,
+    );
+    if (!res.allowed) {
+      return {
+        allowed: false,
+        code: res.decision.code,
+        plan: entitlements.plan,
+        requiredPlan: res.decision.requiredPlan,
+        isPaidActive: entitlements.isPaidActive,
+        featureKey: check.featureKey,
+        enabled: res.decision.code !== "ZERO_QUOTA",
+        limit: res.decision.limit,
+        unlimited: false,
+        currentUsage,
+        requestedAmount,
+        upgradeUrl: res.decision.upgradeUrl,
+        reason: res.decision.message,
+      };
+    }
+    return {
+      allowed: true,
+      plan: entitlements.plan,
+      isPaidActive: entitlements.isPaidActive,
+      featureKey: check.featureKey,
+      enabled: true,
+      limit: res.limit,
+      unlimited: res.unlimited,
+      currentUsage,
+      requestedAmount,
+    };
+  }
+
+  const entry = entitlements.features[
+    check.featureKey as keyof EffectiveOrganizationEntitlements["features"]
+  ] as {
     enabled: boolean;
     limit?: number | null;
     unlimited?: boolean;
-  };
-
-  const requestedAmount = check.requestedAmount ?? 1;
-  const currentUsage = check.currentUsage ?? 0;
+  } | undefined;
 
   if (!entry || !entry.enabled) {
     return {
       allowed: false,
+      code: "FEATURE_NOT_AVAILABLE",
       plan: entitlements.plan,
       isPaidActive: entitlements.isPaidActive,
       featureKey: check.featureKey,
@@ -465,15 +729,17 @@ export function evaluateEntitlementCheck(
     };
   }
 
-  const isUnlimited = entry.unlimited === true || entry.limit === null || entry.limit === undefined;
+  const isUnlimited =
+    entry.unlimited === true || entry.limit === null || entry.limit === undefined;
   if (!isUnlimited && typeof entry.limit === "number") {
     if (currentUsage + requestedAmount > entry.limit) {
       return {
         allowed: false,
+        code: entry.limit === 0 ? "ZERO_QUOTA" : "QUOTA_EXHAUSTED",
         plan: entitlements.plan,
         isPaidActive: entitlements.isPaidActive,
         featureKey: check.featureKey,
-        enabled: true,
+        enabled: entry.limit > 0,
         limit: entry.limit,
         unlimited: false,
         currentUsage,

@@ -103,6 +103,7 @@ export interface AuthenticatedContext {
     fullName?: string;
     emailConfirmed: boolean;
   };
+  organizationId?: string | null;
   supabase?: SupabaseClient;
   admin: SupabaseClient;
   purchaseAuthorization: PurchaseAuthorizationContext;
@@ -169,6 +170,7 @@ export async function requireAuthenticatedUser(
 
     return {
       user: planSession.user,
+      organizationId: planSession.organizationId ?? null,
       admin,
       purchaseAuthorization: {
         authorized: planSession.purchaseAuthorized,
@@ -304,6 +306,107 @@ export interface OrganizationAccess {
   };
 }
 
+export function hasMemberBillingPermission(member: {
+  role?: string | null;
+  can_manage_billing?: boolean | null;
+  permissions?: unknown;
+}): boolean {
+  if (member.role === "owner" || Boolean(member.can_manage_billing)) {
+    return true;
+  }
+  if (member.permissions && typeof member.permissions === "object") {
+    return (member.permissions as Record<string, unknown>)["billing.manage"] === true;
+  }
+  return false;
+}
+
+export function isMembershipActive(member: { status?: string | null }): boolean {
+  return member.status !== "suspended" && member.status !== "removed";
+}
+
+interface RawMembershipRow {
+  organization_id: string;
+  role: string;
+  can_manage_billing?: boolean | null;
+  permissions?: unknown;
+  status?: string | null;
+}
+
+async function fetchUserMemberships(
+  admin: SupabaseClient,
+  userId: string,
+  requestedOrgId?: string | null,
+): Promise<{ data: RawMembershipRow[] | null; error: unknown }> {
+  let query = admin
+    .from("organization_members")
+    .select("organization_id, role, can_manage_billing, permissions, status")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: true });
+
+  if (requestedOrgId) {
+    query = query.eq("organization_id", requestedOrgId);
+  }
+
+  const res = await query;
+  if (!res.error) {
+    return { data: (res.data as RawMembershipRow[] | null) ?? null, error: null };
+  }
+
+  // Safe fallback if older schema/mock lacks `permissions` or `status` columns
+  let fallbackQuery = admin
+    .from("organization_members")
+    .select("organization_id, role, can_manage_billing")
+    .eq("user_id", userId)
+    .order("created_at", { ascending: true });
+
+  if (requestedOrgId) {
+    fallbackQuery = fallbackQuery.eq("organization_id", requestedOrgId);
+  }
+
+  const fallbackRes = await fallbackQuery;
+  return {
+    data: (fallbackRes.data as RawMembershipRow[] | null) ?? null,
+    error: fallbackRes.error,
+  };
+}
+
+export async function listUserActiveOrganizations(
+  admin: SupabaseClient,
+  userId: string,
+): Promise<
+  Array<{
+    id: string;
+    name: string;
+    role: OrganizationMemberRole;
+    can_manage_billing: boolean;
+  }>
+> {
+  const { data: memberships, error } = await fetchUserMemberships(admin, userId);
+  if (error || !memberships) return [];
+
+  const active = memberships.filter(isMembershipActive);
+  if (active.length === 0) return [];
+
+  const orgIds = active.map((m) => String(m.organization_id));
+  const { data: orgs } = await admin
+    .from("organizations")
+    .select("id, name")
+    .in("id", orgIds);
+
+  const orgNameMap = new Map(
+    (orgs || []).map((o) => [String(o.id), String(o.name)]),
+  );
+
+  return active
+    .filter((m) => orgNameMap.has(String(m.organization_id)))
+    .map((m) => ({
+      id: String(m.organization_id),
+      name: orgNameMap.get(String(m.organization_id)) || "Organization",
+      role: m.role as OrganizationMemberRole,
+      can_manage_billing: hasMemberBillingPermission(m),
+    }));
+}
+
 /**
  * Resolves the user's organization membership and verifies whether they have
  * billing management permissions (Owner or Authorized Billing Administrator).
@@ -314,17 +417,11 @@ export async function resolveUserOrganizationAccess(
   requestedOrgId?: string | null,
   requireBillingPermission: boolean = false,
 ): Promise<OrganizationAccess | { error: NextResponse }> {
-  let query = admin
-    .from("organization_members")
-    .select("organization_id, role, can_manage_billing")
-    .eq("user_id", userId)
-    .order("created_at", { ascending: true });
-
-  if (requestedOrgId) {
-    query = query.eq("organization_id", requestedOrgId);
-  }
-
-  const { data: memberships, error: memError } = await query;
+  const { data: memberships, error: memError } = await fetchUserMemberships(
+    admin,
+    userId,
+    requestedOrgId,
+  );
 
   if (memError) {
     return {
@@ -336,7 +433,9 @@ export async function resolveUserOrganizationAccess(
     };
   }
 
-  if (!memberships || memberships.length === 0) {
+  const activeMemberships = (memberships || []).filter(isMembershipActive);
+
+  if (activeMemberships.length === 0) {
     return {
       error: jsonError(
         403,
@@ -347,11 +446,13 @@ export async function resolveUserOrganizationAccess(
   }
 
   const chosen =
-    memberships.find((m) => m.role === "owner" || m.can_manage_billing) ||
-    memberships[0];
+    activeMemberships.find((m) => m.role === "owner") ||
+    activeMemberships.find((m) => hasMemberBillingPermission(m)) ||
+    activeMemberships.find((m) => m.role === "admin") ||
+    activeMemberships.find((m) => m.role === "manager") ||
+    activeMemberships[0];
 
-  const isBillingAuthorized =
-    chosen.role === "owner" || Boolean(chosen.can_manage_billing);
+  const isBillingAuthorized = hasMemberBillingPermission(chosen);
 
   if (requireBillingPermission && !isBillingAuthorized) {
     return {

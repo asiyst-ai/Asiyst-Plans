@@ -383,12 +383,21 @@ export class AsiystDodoGateway {
   }
 
   /**
-   * Changes the plan of an existing active Dodo subscription (upgrade or downgrade).
+   * Changes the plan of an existing active Dodo subscription (upgrade or scheduled downgrade).
    */
   async changeSubscriptionPlan(
     providerSubscriptionId: string,
     targetProductId: string,
-    prorationMode: "prorated_immediately" | "difference_immediately" = "prorated_immediately",
+    prorationMode:
+      | "prorated_immediately"
+      | "difference_immediately"
+      | "do_not_bill" = "prorated_immediately",
+    options?: {
+      effectiveAt?: "immediately" | "next_billing_date";
+      onPaymentFailure?: "prevent_change" | "apply_change";
+      cancelScheduledChangePlan?: boolean;
+      idempotencyKey?: string;
+    },
   ): Promise<{ ok: true } | { ok: false; errorCode: string; error: string }> {
     if (!this.getApiKey()) {
       return {
@@ -399,11 +408,24 @@ export class AsiystDodoGateway {
     }
 
     try {
-      await this.getClient().subscriptions.changePlan(providerSubscriptionId, {
-        product_id: targetProductId,
-        quantity: 1,
-        proration_billing_mode: prorationMode,
-      });
+      await this.getClient().subscriptions.changePlan(
+        providerSubscriptionId,
+        {
+          product_id: targetProductId,
+          quantity: 1,
+          proration_billing_mode: prorationMode,
+          ...(options?.effectiveAt ? { effective_at: options.effectiveAt } : {}),
+          ...(options?.onPaymentFailure
+            ? { on_payment_failure: options.onPaymentFailure }
+            : {}),
+          ...(options?.cancelScheduledChangePlan
+            ? { cancel_scheduled_change_plan: true }
+            : {}),
+        },
+        options?.idempotencyKey
+          ? { idempotencyKey: options.idempotencyKey }
+          : undefined,
+      );
       return { ok: true };
     } catch (err) {
       return {
@@ -413,6 +435,84 @@ export class AsiystDodoGateway {
           err instanceof Error
             ? err.message
             : "Unable to change subscription plan with Dodo Payments.",
+      };
+    }
+  }
+
+  /**
+   * Cancels a scheduled plan change (e.g. scheduled downgrade) on Dodo Payments.
+   */
+  async cancelScheduledPlanChange(
+    providerSubscriptionId: string,
+  ): Promise<{ ok: true } | { ok: false; errorCode: string; error: string }> {
+    if (!this.getApiKey()) {
+      return {
+        ok: false,
+        errorCode: "DODO_GATEWAY_NOT_CONFIGURED",
+        error: "Dodo Payments API key is not configured.",
+      };
+    }
+    try {
+      await this.getClient().subscriptions.cancelChangePlan(providerSubscriptionId);
+      return { ok: true };
+    } catch (err) {
+      return {
+        ok: false,
+        errorCode: "DODO_CANCEL_SCHEDULED_CHANGE_FAILED",
+        error:
+          err instanceof Error
+            ? err.message
+            : "Unable to cancel scheduled plan change with Dodo Payments.",
+      };
+    }
+  }
+
+  /**
+   * Retrieves authoritative subscription details directly from Dodo Payments.
+   */
+  async retrieveSubscriptionDetails(providerSubscriptionId: string): Promise<
+    | {
+        ok: true;
+        subscriptionId: string;
+        status: string;
+        productId: string;
+        cancelAtNextBillingDate: boolean;
+        currentPeriodStart: string | null;
+        currentPeriodEnd: string | null;
+        scheduledProductId: string | null;
+        scheduledEffectiveAt: string | null;
+        recurringAmountMinor: number;
+        currency: string;
+      }
+    | { ok: false; error: string }
+  > {
+    if (!this.getApiKey()) {
+      return { ok: false, error: "Dodo Payments API key is not configured." };
+    }
+    try {
+      const sub = await this.getClient().subscriptions.retrieve(
+        providerSubscriptionId,
+      );
+      return {
+        ok: true,
+        subscriptionId: sub.subscription_id,
+        status: String(sub.status || "").toLowerCase(),
+        productId: sub.product_id,
+        cancelAtNextBillingDate: Boolean(sub.cancel_at_next_billing_date),
+        currentPeriodStart: validIsoDate(sub.previous_billing_date),
+        currentPeriodEnd: validIsoDate(sub.next_billing_date),
+        scheduledProductId: sub.scheduled_change?.product_id || null,
+        scheduledEffectiveAt: validIsoDate(sub.scheduled_change?.effective_at),
+        recurringAmountMinor: Number(sub.recurring_pre_tax_amount ?? 0),
+        currency: String(sub.currency || "USD").toUpperCase(),
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error:
+          err instanceof Error
+            ? err.message
+            : "Unable to retrieve Dodo subscription.",
       };
     }
   }
@@ -643,6 +743,26 @@ export class AsiystDodoGateway {
       };
     }
 
+    // Official Dodo SDK Standard Webhooks verification (`webhooks.unwrap`), with HMAC verification fallback for raw non-base64 test secrets
+    let sdkUnwrapped = false;
+    try {
+      const sdkVerifier = new DodoPayments({
+        bearerToken: this.getApiKey() || "dodo_webhook_verify_only",
+        webhookKey: rawSecret,
+      });
+      sdkVerifier.webhooks.unwrap(rawPayload, {
+        headers: {
+          "webhook-id": webhookId,
+          "webhook-timestamp": webhookTimestamp,
+          "webhook-signature": webhookSignature,
+        },
+        key: rawSecret,
+      });
+      sdkUnwrapped = true;
+    } catch {
+      sdkUnwrapped = false;
+    }
+
     let secretBuffer: Buffer;
     if (rawSecret.startsWith("whsec_")) {
       try {
@@ -667,8 +787,9 @@ export class AsiystDodoGateway {
       return idx >= 0 ? part.slice(idx + 1) : part;
     });
 
-    let matched = false;
+    let matched = sdkUnwrapped;
     for (const candidate of candidates) {
+      if (matched) break;
       if (
         candidate.length === expectedBase64.length &&
         timingSafeEqual(Buffer.from(candidate), Buffer.from(expectedBase64))

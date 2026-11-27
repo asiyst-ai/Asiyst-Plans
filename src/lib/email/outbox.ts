@@ -43,27 +43,42 @@ export async function resolveOrganizationBillingRecipients(
 ): Promise<BillingRecipient[]> {
   const deduplicated = new Map<string, BillingRecipient>();
 
-  // 1. Query organization members with owner or can_manage_billing
+  // 1. Query active organization members with owner or billing authority
   const { data: members } = await admin
     .from("organization_members")
-    .select("user_id, role, can_manage_billing")
+    .select("user_id, role, status, can_manage_billing, permissions")
     .eq("organization_id", organizationId);
 
-  const eligibleMembers = (members || []).filter(
-    (m) => m.role === "owner" || m.can_manage_billing === true,
-  );
+  const eligibleMembers = (members || []).filter((m) => {
+    const status = String(m.status || "active").toLowerCase();
+    if (status === "suspended" || status === "removed") return false;
+    const perms =
+      m.permissions && typeof m.permissions === "object"
+        ? (m.permissions as Record<string, unknown>)
+        : {};
+    return (
+      m.role === "owner" ||
+      m.can_manage_billing === true ||
+      perms["billing.manage"] === true
+    );
+  });
 
   for (const member of eligibleMembers) {
     const userId = String(member.user_id);
 
     // Check optional notification preference if non-essential
     if (!isEssentialBillingEmail(eventType)) {
+      const category = eventType.includes("marketing")
+        ? "marketing"
+        : eventType.includes("product")
+          ? "product_updates"
+          : "usage_alerts";
       const { data: pref } = await admin
         .from("notification_preferences")
         .select("enabled")
         .eq("organization_id", organizationId)
         .eq("user_id", userId)
-        .eq("notification_category", "usage_alerts")
+        .eq("notification_category", category)
         .maybeSingle();
 
       if (pref && pref.enabled === false) {
@@ -71,7 +86,7 @@ export async function resolveOrganizationBillingRecipients(
       }
     }
 
-    // Verify user email via auth.admin or profiles
+    // Verify user email strictly via Supabase Auth (confirmed emails only)
     let verifiedEmail: string | null = null;
     try {
       const { data: authData } = await admin.auth.admin.getUserById(userId);
@@ -83,14 +98,7 @@ export async function resolveOrganizationBillingRecipients(
         verifiedEmail = authData.user.email.trim().toLowerCase();
       }
     } catch {
-      const { data: profile } = await admin
-        .from("profiles")
-        .select("email")
-        .eq("id", userId)
-        .maybeSingle();
-      if (profile?.email && String(profile.email).includes("@")) {
-        verifiedEmail = String(profile.email).trim().toLowerCase();
-      }
+      verifiedEmail = null;
     }
 
     if (verifiedEmail && !deduplicated.has(verifiedEmail)) {
@@ -236,7 +244,7 @@ export async function enqueueBillingNotification(
               entity_id: input.organizationId,
               title: meta.headline,
               description: meta.body,
-              action_url: "/dashboard/settings?tab=billing",
+              action_url: meta.ctaUrl,
               metadata: input.payload as unknown as Record<string, unknown>,
               idempotency_key: dashIdempotencyKey,
             })
@@ -253,7 +261,7 @@ export async function enqueueBillingNotification(
               : "info",
             title: meta.headline,
             body: meta.body,
-            action_url: "/dashboard/settings?tab=billing",
+            action_url: meta.ctaUrl,
             is_read: false,
             metadata: input.payload as unknown as Record<string, unknown>,
           });

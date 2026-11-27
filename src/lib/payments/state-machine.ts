@@ -146,6 +146,7 @@ export interface VerifiedPaymentActivationInput {
   currentPeriodEnd?: string | null;
   cancelAtPeriodEnd?: boolean;
   isRenewal?: boolean;
+  isPlanChange?: boolean;
   eventSource: "dodo_webhook" | "provider_reconciliation";
 }
 
@@ -220,7 +221,7 @@ export async function activateVerifiedSubscriptionPayment(
     };
   }
 
-  // 3. Validate payment amount matches authoritative plan price (allowing tax on top of exact subtotal)
+  // 3. Validate payment amount matches authoritative plan price (allowing tax on top of exact subtotal, or valid non-negative proration on verified plan changes)
   const expectedMinor = planDef.priceMinor;
   const effectiveSubtotal =
     typeof input.subtotalMinor === "number" && input.subtotalMinor > 0
@@ -234,7 +235,10 @@ export async function activateVerifiedSubscriptionPayment(
       input.amountMinor === expectedMinor + reportedTax) ||
     (input.amountMinor > expectedMinor &&
       typeof input.taxAmountMinor === "number" &&
-      input.amountMinor - input.taxAmountMinor === expectedMinor);
+      input.amountMinor - input.taxAmountMinor === expectedMinor) ||
+    (input.isPlanChange === true &&
+      input.amountMinor >= 0 &&
+      input.amountMinor <= expectedMinor * 2);
 
   if (!Number.isSafeInteger(input.amountMinor) || !amountValid) {
     return {
@@ -369,6 +373,8 @@ export async function activateVerifiedSubscriptionPayment(
       current_period_end: periodEnd,
       cancel_at_period_end: Boolean(input.cancelAtPeriodEnd),
       cancelled_at: null,
+      scheduled_plan: null,
+      scheduled_change_effective_at: null,
       billing_recovery_deadline: null,
       ...(isFirstPaidWelcomeNeeded ? { first_paid_welcome_sent_at: nowIso } : {}),
       updated_at: nowIso,
@@ -453,7 +459,11 @@ export async function activateVerifiedSubscriptionPayment(
         status: "succeeded",
         payment_state: "payment_succeeded",
         activated_subscription_id: input.subscriptionId,
-        payment_type: input.isRenewal ? "subscription_renewal" : "subscription_initial",
+        payment_type: input.isPlanChange
+          ? "subscription_upgrade"
+          : input.isRenewal
+            ? "subscription_renewal"
+            : "subscription_initial",
         invoice_number: invoiceNumber,
         paid_at: nowIso,
         updated_at: nowIso,

@@ -1,0 +1,62 @@
+# Asiyst Subscription Platform & Product Plans
+> Official pricing, subscription tiers, and feature entitlement directory for Asiyst AI (https://asiyst.com).
+
+## Canonical Domain & Identity
+- Subscription Platform: https://plan.asiyst.com
+- Main Application: https://asiyst.com
+- Documentation: https://asiyst.com/docs
+- Payment Processing: Powered by Dodo Payments (PCI-DSS compliant)
+
+## Subscription Plans Overview
+
+### 1. Asiyst Zero (Free Plan)
+- Price: $0.00 / month
+- Target Audience: Hobbyists, developers testing Web SDK, and personal projects.
+- Key Capabilities:
+  - 1 Active Project & 1 Workspace
+  - Basic 2.5D visual avatar widget
+  - Core website knowledge crawling (up to 10 pages/month)
+  - First-party web analytics with 7 days historical retention
+  - Community support
+
+### 2. Asiyst Pulse ($24.00 / month)
+- Price: $24.00 / month ($240.00 / year with 2 months free)
+- Target Audience: Small businesses, solo founders, and growing blogs.
+- Key Capabilities:
+  - Up to 3 Active Projects & 1 Workspace
+  - Full 3D animated glTF avatar character models
+  - Knowledge base crawling (up to 100 pages/month)
+  - Advanced website analytics (top landing pages, device categories, response latency)
+  - 30 days analytics history retention
+  - Priority email support
+
+### 3. Asiyst Vector ($54.00 / month)
+- Price: $54.00 / month ($540.00 / year with 2 months free)
+- Target Audience: E-commerce brands, high-growth SaaS websites, and professional agencies.
+- Key Capabilities:
+  - Up to 10 Active Projects & 2 Workspaces
+  - Custom 3D avatar glTF/GLB file uploads
+  - Scheduled automated sitemap crawling (up to 1,000 pages/month)
+  - Core Web Vitals health tracking (LCP, INP, CLS)
+  - Conversion funnels, cart abandonment analytics, and CSV/JSON/PDF/XLSX export
+  - 90 days analytics history retention
+  - Webhook dispatch and CRM integrations
+
+### 4. Asiyst Quantum ($154.00 / month)
+- Price: $154.00 / month ($1,540.00 / year with 2 months free)
+- Target Audience: Enterprise organizations, high-traffic portals, and volume retailers.
+- Key Capabilities:
+  - Unlimited Projects & 10 Team Workspaces
+  - Dedicated multi-project roll-up analytics
+  - Statistical anomaly detection & automated traffic drift alerts
+  - Weekly visitor retention cohorts & executive AI summary reports
+  - 365 days full analytics history retention
+  - Unlimited crawling pages & knowledge versioning
+  - Full white-label custom domain branding & dedicated SLAs
+
+## Public URLs
+- Plan Comparison: https://plan.asiyst.com/plans
+- Special Offers: https://plan.asiyst.com/offers
+- Product Catalog: https://plan.asiyst.com/products
+- Asiyst AI Specifications: https://plan.asiyst.com/products/asiyst-ai
+- Asiyst AI Pricing: https://plan.asiyst.com/products/asiyst-ai/plans

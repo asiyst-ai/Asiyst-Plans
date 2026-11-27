@@ -3,6 +3,7 @@
 import * as React from "react";
 import { FileText, Printer, X } from "lucide-react";
 import { formatMinorCurrency } from "@/features/catalog/plans";
+import { PLANS_ORG_CHANGE_EVENT, PLANS_ORG_STORAGE_KEY } from "../layout";
 
 interface InvoiceRecord {
   id: string;
@@ -50,9 +51,15 @@ export default function AccountInvoicesPage() {
     React.useState<InvoiceRecord | null>(null);
 
   React.useEffect(() => {
-    async function load() {
+    async function load(explicitOrgId?: string | null) {
+      const orgId =
+        explicitOrgId ??
+        (typeof window !== "undefined"
+          ? window.localStorage.getItem(PLANS_ORG_STORAGE_KEY)
+          : null);
+      const qs = orgId ? `?organizationId=${encodeURIComponent(orgId)}` : "";
       try {
-        const res = await fetch("/api/v1/billing/invoices", {
+        const res = await fetch(`/api/v1/billing/invoices${qs}`, {
           cache: "no-store",
         });
         if (res.ok) {
@@ -64,6 +71,9 @@ export default function AccountInvoicesPage() {
       }
     }
     void load();
+    const onOrgChange = (e: Event) => void load((e as CustomEvent<string>).detail);
+    window.addEventListener(PLANS_ORG_CHANGE_EVENT, onOrgChange);
+    return () => window.removeEventListener(PLANS_ORG_CHANGE_EVENT, onOrgChange);
   }, []);
 
   return (

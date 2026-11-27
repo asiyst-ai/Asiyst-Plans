@@ -13,7 +13,6 @@ import {
 } from "@/lib/auth/session";
 import { enqueueBillingNotification } from "@/lib/email/outbox";
 import { createAdminClient, isSupabaseAdminConfigured } from "@/lib/supabase/admin";
-import type { EffectiveOrganizationEntitlements } from "@/types/billing";
 
 const checkSchema = z.object({
   organizationId: z.string().uuid().optional(),
@@ -104,9 +103,12 @@ export async function POST(request: NextRequest) {
     organizationId,
   );
 
-  const featureKey =
-    parsed.data.featureKey as keyof EffectiveOrganizationEntitlements["features"];
-  if (!(featureKey in entitlements.features)) {
+  const featureKey = parsed.data.featureKey;
+  const isKnownKey =
+    featureKey in entitlements.features ||
+    featureKey in entitlements.capabilities ||
+    featureKey in entitlements.quotas;
+  if (!isKnownKey) {
     return jsonError(
       400,
       "UNKNOWN_FEATURE_KEY",
@@ -123,6 +125,19 @@ export async function POST(request: NextRequest) {
       .eq("organization_id", organizationId)
       .neq("status", "deleted");
     currentUsage = count ?? 0;
+  } else if (featureKey === "workspaces") {
+    const { data: orgOwner } = await adminClient
+      .from("organizations")
+      .select("owner_id")
+      .eq("id", organizationId)
+      .maybeSingle();
+    if (orgOwner?.owner_id) {
+      const { count } = await adminClient
+        .from("organizations")
+        .select("id", { count: "exact", head: true })
+        .eq("owner_id", orgOwner.owner_id);
+      currentUsage = count ?? 0;
+    }
   } else if (featureKey === "organization_seats") {
     const { count } = await adminClient
       .from("organization_members")
@@ -141,8 +156,17 @@ export async function POST(request: NextRequest) {
         .from("knowledge_files")
         .select("id", { count: "exact", head: true })
         .in("project_id", projectIds)
+        .is("site_url_id", null)
+        .is("content_url", null)
         .neq("status", "failed");
       currentUsage = count ?? 0;
+    }
+  } else if (featureKey === "crawl_pages" && parsed.data.projectId) {
+    const { data: crawlUsage } = await adminClient.rpc("get_crawl_quota_usage", {
+      p_project_id: parsed.data.projectId,
+    });
+    if (crawlUsage && typeof crawlUsage.used === "number") {
+      currentUsage = crawlUsage.used;
     }
   }
 

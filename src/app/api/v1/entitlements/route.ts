@@ -41,7 +41,7 @@ export async function GET(request: NextRequest) {
   const orgAccess = await resolveUserOrganizationAccess(
     auth.admin,
     auth.user.id,
-    requestedOrgId,
+    requestedOrgId || auth.organizationId || null,
     false,
   );
   if ("error" in orgAccess) return orgAccess.error;

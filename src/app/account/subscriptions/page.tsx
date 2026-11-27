@@ -20,6 +20,7 @@ import {
   normalizeOfficialPlanSlug,
 } from "@/features/catalog/plans";
 import type { OfficialPlanSlug } from "@/types/billing";
+import { PLANS_ORG_CHANGE_EVENT, PLANS_ORG_STORAGE_KEY } from "../layout";
 
 interface SubscriptionRecord {
   id: string;
@@ -67,9 +68,15 @@ function SubscriptionsManagerContent() {
   });
   const [busyAction, setBusyAction] = React.useState<string | null>(null);
 
-  const loadSubscriptionData = React.useCallback(async () => {
+  const loadSubscriptionData = React.useCallback(async (explicitOrgId?: string | null) => {
+    const orgId =
+      explicitOrgId ??
+      (typeof window !== "undefined"
+        ? window.localStorage.getItem(PLANS_ORG_STORAGE_KEY)
+        : null);
+    const qs = orgId ? `?organizationId=${encodeURIComponent(orgId)}` : "";
     try {
-      const res = await fetch("/api/v1/subscriptions");
+      const res = await fetch(`/api/v1/subscriptions${qs}`, { cache: "no-store" });
       if (!res.ok) return;
       const body = await res.json();
       setSubscription(body.data?.subscription || null);
@@ -83,7 +90,12 @@ function SubscriptionsManagerContent() {
 
   React.useEffect(() => {
     let active = true;
-    fetch("/api/v1/subscriptions")
+    const orgId =
+      typeof window !== "undefined"
+        ? window.localStorage.getItem(PLANS_ORG_STORAGE_KEY)
+        : null;
+    const qs = orgId ? `?organizationId=${encodeURIComponent(orgId)}` : "";
+    fetch(`/api/v1/subscriptions${qs}`, { cache: "no-store" })
       .then((res) => (res.ok ? res.json() : null))
       .then((body) => {
         if (!active || !body) return;
@@ -95,10 +107,15 @@ function SubscriptionsManagerContent() {
       .catch(() => {
         // Handled gracefully
       });
+    const onOrgChange = (e: Event) => {
+      void loadSubscriptionData((e as CustomEvent<string>).detail);
+    };
+    window.addEventListener(PLANS_ORG_CHANGE_EVENT, onOrgChange);
     return () => {
       active = false;
+      window.removeEventListener(PLANS_ORG_CHANGE_EVENT, onOrgChange);
     };
-  }, []);
+  }, [loadSubscriptionData]);
 
   async function handleLifecycleAction(
     action: "upgrade" | "downgrade" | "cancel" | "reactivate",

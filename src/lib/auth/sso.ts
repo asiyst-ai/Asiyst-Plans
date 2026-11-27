@@ -538,6 +538,7 @@ export interface VerifiedPlanSession {
   purchaseAuthorizationStatus: PurchaseAuthorizationStatus;
   purchaseExpiresAt: string | null;
   remainingPurchaseSeconds: number;
+  organizationId: string | null;
   user: {
     id: string;
     email: string;
@@ -564,6 +565,7 @@ export async function verifyPlanSessionFromRequest(
       purchaseAuthorizationStatus: "missing",
       purchaseExpiresAt: null,
       remainingPurchaseSeconds: 0,
+      organizationId: null,
       user: null,
     };
   }
@@ -576,6 +578,7 @@ export async function verifyPlanSessionFromRequest(
       purchaseAuthorizationStatus: "missing",
       purchaseExpiresAt: null,
       remainingPurchaseSeconds: 0,
+      organizationId: null,
       user: null,
     };
   }
@@ -597,6 +600,7 @@ export async function verifyPlanSessionFromRequest(
       purchaseAuthorizationStatus: "missing",
       purchaseExpiresAt: null,
       remainingPurchaseSeconds: 0,
+      organizationId: null,
       user: null,
     };
   }
@@ -619,6 +623,7 @@ export async function verifyPlanSessionFromRequest(
         ? String(authRow.purchase_expires_at)
         : null,
       remainingPurchaseSeconds: 0,
+      organizationId: null,
       user: null,
     };
   }
@@ -635,6 +640,7 @@ export async function verifyPlanSessionFromRequest(
       purchaseAuthorizationStatus: "revoked",
       purchaseExpiresAt: null,
       remainingPurchaseSeconds: 0,
+      organizationId: null,
       user: null,
     };
   }
@@ -694,6 +700,9 @@ export async function verifyPlanSessionFromRequest(
       ? String(authRow.purchase_expires_at)
       : null,
     remainingPurchaseSeconds,
+    organizationId: authRow.organization_id
+      ? String(authRow.organization_id)
+      : null,
     user,
   };
 }

@@ -11,12 +11,15 @@ export async function GET(request: NextRequest) {
   const auth = await requireAuthenticatedUser(request);
   if ("error" in auth) return auth.error;
 
-  const requestedOrgId = request.nextUrl.searchParams.get("organizationId");
+  const requestedOrgId =
+    request.nextUrl.searchParams.get("organizationId") ||
+    auth.organizationId ||
+    null;
   const orgAccess = await resolveUserOrganizationAccess(
     auth.admin,
     auth.user.id,
     requestedOrgId,
-    false,
+    true,
   );
   if ("error" in orgAccess) return orgAccess.error;
 

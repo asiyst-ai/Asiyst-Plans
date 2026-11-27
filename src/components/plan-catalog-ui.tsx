@@ -327,7 +327,7 @@ export function CommercialRulesCallout() {
             Organization-Owned Subscriptions
           </h4>
           <p className="text-xs leading-relaxed text-[#69736C]">
-            Your organization owns the subscription, not an individual project. One subscription covers all eligible projects in your workspace (up to 1 on Zero/Pulse, 3 on Vector, and 10 on Quantum), and entitlements activate automatically in Asiyst-WEB once payment is verified.
+            Your workspace owns its subscription, covering all eligible projects (1 on Zero, up to 3 on Pulse, up to 10 on Vector, and Unlimited on Quantum across up to 10 workspaces). Entitlements activate automatically in Asiyst-WEB once payment is verified.
           </p>
         </div>
       </div>

@@ -67,6 +67,7 @@ export const ESSENTIAL_BILLING_EMAIL_EVENTS = new Set<BillingEmailEventType>([
   "billing.invoice.available",
   "billing.details.updated",
   "billing.contact.changed",
+  "billing.contact.verification",
   "billing.admin.invited",
   "billing.admin.role_changed",
   "billing.usage.limit_reached",
@@ -332,6 +333,16 @@ export function getBillingEmailMetadata(payload: EmailTemplatePayload): {
         headline: "Billing details updated",
         body: `The billing contact or billing profile information for ${org} was recently updated.`,
         ctaLabel: "Review Billing Settings",
+        ctaUrl: payload.actionUrl || `${PLAN_APP_BASE_URL}/account/settings`,
+      };
+
+    case "billing.contact.verification":
+      return {
+        subject: `Verify your billing email address for ${org}`,
+        preheader: `Confirm this email address to receive invoices and billing notices for ${org}.`,
+        headline: "Verify Billing Contact Email",
+        body: `You were designated as the billing contact for ${org} on Asiyst Plan. Please verify this email address to receive official invoices, receipts, and renewal notices.`,
+        ctaLabel: payload.actionLabel || "Verify Billing Email",
         ctaUrl: payload.actionUrl || `${PLAN_APP_BASE_URL}/account/settings`,
       };
 

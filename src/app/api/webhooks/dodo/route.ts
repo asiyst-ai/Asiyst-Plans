@@ -242,8 +242,16 @@ export async function POST(request: NextRequest) {
 
       // Paid activation & renewal MUST pass through centralized `activateVerifiedSubscriptionPayment`
       if (nextStatus === "active") {
+        const isPlanChangeEvent =
+          event.rawEventType === "subscription.plan_changed" ||
+          (previousStatus === "active" &&
+            previousPlanSlug !== "zero" &&
+            previousPlanSlug !== targetPlanSlug);
+
         const effectiveAmount =
-          event.amountMinor > 0 ? event.amountMinor : planDef.priceMinor;
+          event.amountMinor > 0 || isPlanChangeEvent
+            ? event.amountMinor
+            : planDef.priceMinor;
 
         const activation = await activateVerifiedSubscriptionPayment({
           admin,
@@ -262,6 +270,7 @@ export async function POST(request: NextRequest) {
           currentPeriodEnd: event.currentPeriodEnd,
           cancelAtPeriodEnd: event.cancelAtPeriodEnd,
           isRenewal: event.rawEventType === "subscription.renewed",
+          isPlanChange: isPlanChangeEvent,
           eventSource: "dodo_webhook",
         });
 

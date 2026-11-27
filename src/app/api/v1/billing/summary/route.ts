@@ -13,12 +13,15 @@ export async function GET(request: NextRequest) {
   const auth = await requireAuthenticatedUser(request);
   if ("error" in auth) return auth.error;
 
-  const requestedOrgId = request.nextUrl.searchParams.get("organizationId");
+  const requestedOrgId =
+    request.nextUrl.searchParams.get("organizationId") ||
+    auth.organizationId ||
+    null;
   const orgAccess = await resolveUserOrganizationAccess(
     auth.admin,
     auth.user.id,
     requestedOrgId,
-    false,
+    true,
   );
   if ("error" in orgAccess) return orgAccess.error;
 
@@ -40,7 +43,7 @@ export async function GET(request: NextRequest) {
       .neq("status", "deleted"),
     auth.admin
       .from("organization_members")
-      .select("id", { count: "exact", head: true })
+      .select("id, status")
       .eq("organization_id", organizationId),
     auth.admin
       .from("billing_payments")
@@ -88,7 +91,10 @@ export async function GET(request: NextRequest) {
           unlimited: entitlements.features.projects.unlimited,
         },
         organizationSeats: {
-          used: membersCount.count ?? 0,
+          used: (membersCount.data || []).filter(
+            (m: { status?: string | null }) =>
+              m.status !== "suspended" && m.status !== "removed",
+          ).length,
           limit: entitlements.features.organization_seats.limit,
           unlimited: entitlements.features.organization_seats.unlimited,
         },

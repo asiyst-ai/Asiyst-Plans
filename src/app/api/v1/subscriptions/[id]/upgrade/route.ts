@@ -104,11 +104,21 @@ export async function POST(request: NextRequest, context: Context) {
     );
   }
 
+  const providedIdempotencyKey =
+    request.headers.get("idempotency-key")?.trim() ||
+    `asiyst_upgrade_${sub.id}_${targetSlug}_${String(sub.current_period_end || "now").slice(0, 10)}`;
+
   const gateway = new AsiystDodoGateway();
   const changeResult = await gateway.changeSubscriptionPlan(
     String(sub.dodo_subscription_id),
     targetProductId,
     "prorated_immediately",
+    {
+      effectiveAt: "immediately",
+      onPaymentFailure: "prevent_change",
+      cancelScheduledChangePlan: Boolean(sub.scheduled_plan),
+      idempotencyKey: providedIdempotencyKey,
+    },
   );
 
   if (!changeResult.ok) {

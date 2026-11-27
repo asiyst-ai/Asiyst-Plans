@@ -42,11 +42,11 @@ export async function POST(request: NextRequest, context: Context) {
   );
   if ("error" in orgAccess) return orgAccess.error;
 
-  if (!sub.cancel_at_period_end) {
+  if (!sub.cancel_at_period_end && !sub.scheduled_plan) {
     return jsonError(
       409,
       "SUBSCRIPTION_NOT_SCHEDULED_TO_CANCEL",
-      "This subscription is not scheduled to cancel.",
+      "This subscription has no scheduled cancellation or downgrade to reverse.",
     );
   }
 
@@ -59,13 +59,24 @@ export async function POST(request: NextRequest, context: Context) {
   }
 
   const gateway = new AsiystDodoGateway();
-  const providerUpdate = await gateway.updateCancellationState(
-    String(sub.dodo_subscription_id),
-    "reactivate",
-  );
+  if (sub.cancel_at_period_end) {
+    const providerUpdate = await gateway.updateCancellationState(
+      String(sub.dodo_subscription_id),
+      "reactivate",
+    );
 
-  if (!providerUpdate.ok) {
-    return jsonError(503, providerUpdate.errorCode, providerUpdate.error);
+    if (!providerUpdate.ok) {
+      return jsonError(503, providerUpdate.errorCode, providerUpdate.error);
+    }
+  }
+
+  if (sub.scheduled_plan && sub.scheduled_plan !== "zero") {
+    const cancelScheduleRes = await gateway.cancelScheduledPlanChange(
+      String(sub.dodo_subscription_id),
+    );
+    if (!cancelScheduleRes.ok) {
+      return jsonError(503, cancelScheduleRes.errorCode, cancelScheduleRes.error);
+    }
   }
 
   const requestId = randomUUID();
